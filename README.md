@@ -1,12 +1,13 @@
 # Discogs Preview for YouTube
 
-Chrome extension to quickly view, filter, and link to Discogs marketplace data while digging for vinyl on YouTube. Automatically finds matching vinyl releases and shows pricing — lowest, median, VG+/NM estimates — right below the video.
+Chrome extension to quickly view, filter, and link to Discogs marketplace data while digging for vinyl on YouTube.
 
 ## Features
 
 - Auto-detects the YouTube video title and searches Discogs for matching vinyl releases
-- Shows lowest price, median, VG+ and NM estimates with direct links to listings
-- US-only toggle to filter by seller location
+- Shows lowest price, median, and suggested prices with direct links to listings
+- **VG+ filter** to show only listings graded Very Good Plus or better
+- **US Only toggle** to filter by seller location
 - Inline panel on the YouTube page + toolbar popup
 
 ## Setup
