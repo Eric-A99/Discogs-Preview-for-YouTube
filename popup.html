@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 580px;
+      min-height: 200px;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: linear-gradient(160deg, #060606 0%, #111 50%, #0a0a0a 100%);
+      color: #e0e0e0;
+      padding: 0;
+    }
+
+    /* -- header -- */
+    .hdr {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 18px;
+      background: linear-gradient(90deg, rgba(0,230,118,0.07) 0%, transparent 70%);
+      border-bottom: 1px solid rgba(0,230,118,0.12);
+    }
+    .hdr img { width: 22px; height: 22px; border-radius: 4px; }
+    .hdr h1  { font-size: 14px; font-weight: 600; color: #00e676; flex: 1; letter-spacing: .3px; }
+
+    .change-token {
+      font-size: 10px;
+      color: #666;
+      cursor: pointer;
+      text-decoration: none;
+      transition: color .2s;
+    }
+    .change-token:hover { color: #00e676; }
+
+    /* -- token setup (hidden once saved) -- */
+    .setup {
+      padding: 20px 18px;
+    }
+    .setup.hidden { display: none; }
+
+    .setup-label {
+      font-size: 10px; text-transform: uppercase; letter-spacing: .5px;
+      color: #b0b0b0; margin-bottom: 6px;
+    }
+    .setup-row { display: flex; gap: 6px; }
+
+    .setup input {
+      flex: 1; padding: 8px 10px; font-size: 12px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      color: #f0f0f0; background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.12); border-radius: 6px; outline: none;
+    }
+    .setup input:focus { border-color: rgba(0,230,118,.5); box-shadow: 0 0 0 2px rgba(0,230,118,.1); }
+
+    .btn {
+      padding: 8px 16px; font-size: 11px; font-weight: 600;
+      border: none; border-radius: 6px; cursor: pointer;
+      background: #00e676; color: #0a0a0a;
+      transition: background .2s, box-shadow .2s;
+    }
+    .btn:hover { background: #00c853; box-shadow: 0 0 8px rgba(0,230,118,.3); }
+
+    .setup-hint {
+      font-size: 10px; color: #777; margin-top: 8px;
+    }
+    .setup-hint a { color: #00e676; text-decoration: none; }
+    .setup-hint a:hover { text-decoration: underline; }
+
+    /* -- main content -- */
+    .main { padding: 14px 18px; }
+    .main.hidden { display: none; }
+
+    /* -- not-youtube message -- */
+    .not-yt {
+      text-align: center; padding: 30px 18px; color: #e0e0e0; font-size: 13px;
+    }
+    .not-yt.hidden { display: none; }
+
+    /* -- loading -- */
+    .loading {
+      display: flex; align-items: center; gap: 10px;
+      padding: 30px 18px; color: #b0b0b0; font-size: 12px;
+    }
+    .loading.hidden { display: none; }
+
+    .spinner {
+      width: 16px; height: 16px;
+      border: 2px solid rgba(0,230,118,.2);
+      border-top: 2px solid #00e676;
+      border-radius: 50%;
+      animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* -- error -- */
+    .error-msg {
+      padding: 14px 18px; color: #ff5252; font-size: 12px;
+    }
+    .error-msg.hidden { display: none; }
+
+    /* -- release header -- */
+    .release {
+      display: flex; gap: 12px; margin-bottom: 16px;
+    }
+    .release-thumb {
+      width: 72px; height: 72px; border-radius: 6px; object-fit: cover;
+      border: 1px solid rgba(255,255,255,.06); background: rgba(255,255,255,.03);
+    }
+    .release-meta { flex: 1; min-width: 0; }
+
+    .release-title {
+      font-size: 14px; font-weight: 600; color: #f0f0f0;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .release-artist {
+      font-size: 12px; color: #b0b0b0; margin-top: 2px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .release-year { color: #777; }
+    .match-count { color: #00e676; font-size: 11px; margin-left: 4px; }
+
+    .release-link {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 11px; font-weight: 500; color: #00e676;
+      text-decoration: none; margin-top: 8px;
+      padding: 4px 10px; border-radius: 5px;
+      background: rgba(0,230,118,.08); border: 1px solid rgba(0,230,118,.18);
+      transition: background .2s, box-shadow .2s;
+    }
+    .release-link:hover {
+      background: rgba(0,230,118,.16); box-shadow: 0 0 8px rgba(0,230,118,.15);
+    }
+
+    /* -- section divider -- */
+    .section-divider {
+      font-size: 10px; text-transform: uppercase; letter-spacing: .6px;
+      color: #aaa; margin: 14px 0 10px; padding-top: 12px;
+      border-top: 1px solid rgba(255,255,255,.06);
+      display: flex; align-items: center; gap: 6px;
+    }
+    .section-divider .badge {
+      font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px;
+      background: rgba(0,230,118,.12); color: #00e676;
+    }
+
+    /* -- stats grid -- */
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr 1fr;
+      gap: 12px;
+    }
+
+    .stat-card {
+      background: linear-gradient(135deg, rgba(255,255,255,.03), rgba(255,255,255,.01));
+      border: 1px solid rgba(255,255,255,.06);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+
+    .stat-label {
+      font-size: 9px; text-transform: uppercase; letter-spacing: .5px;
+      color: #ccc; margin-bottom: 4px;
+    }
+    .stat-value {
+      font-size: 17px; font-weight: 700; color: #f0f0f0;
+    }
+    .stat-value.green { color: #00e676; }
+    .stat-sub {
+      font-size: 10px; color: #bbb; margin-top: 2px;
+    }
+
+    /* -- US toggle row -- */
+    .toggle-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 0 4px;
+      margin-top: 4px;
+    }
+    .toggle-text { font-size: 11px; color: #d9d9d9; }
+
+    .switch {
+      position: relative; display: inline-block; width: 34px; height: 18px;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+
+    .slider {
+      position: absolute; cursor: pointer; inset: 0;
+      background: rgba(255,255,255,.1); border-radius: 18px;
+      transition: background .25s, box-shadow .25s;
+    }
+    .slider::before {
+      content: ''; position: absolute; width: 14px; height: 14px;
+      left: 2px; bottom: 2px; background: #b0b0b0; border-radius: 50%;
+      transition: transform .25s, background .25s;
+    }
+    .switch input:checked + .slider {
+      background: rgba(0,230,118,.35);
+      box-shadow: 0 0 6px rgba(0,230,118,.3);
+    }
+    .switch input:checked + .slider::before {
+      transform: translateX(16px); background: #00e676;
+    }
+
+    /* -- US section -- */
+    .us-section { margin-top: 0; }
+    .us-section.hidden { display: none; }
+
+    /* -- match list -- */
+    .match-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 6px;
+    }
+
+    .match-item {
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, rgba(255,255,255,.03), rgba(255,255,255,.01));
+      border: 1px solid rgba(255,255,255,.06);
+      text-decoration: none;
+      color: inherit;
+      transition: background .2s, border-color .2s;
+      cursor: pointer;
+    }
+    .match-item:hover {
+      background: rgba(0,230,118,.06);
+      border-color: rgba(0,230,118,.2);
+    }
+    .match-item.cheapest {
+      border-color: rgba(0,230,118,.3);
+      background: linear-gradient(135deg, rgba(0,230,118,.07), rgba(0,230,118,.02));
+    }
+
+    .match-thumb {
+      width: 40px;
+      height: 40px;
+      border-radius: 5px;
+      object-fit: cover;
+      flex-shrink: 0;
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.06);
+    }
+    .match-thumb-empty {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+    }
+
+    .match-info {
+      flex: 1;
+      min-width: 0;
+    }
+    .match-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: #ebebeb;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .match-artist {
+      font-size: 10px;
+      color: #ccc;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .match-price-col {
+      flex-shrink: 0;
+      text-align: right;
+    }
+    .match-price {
+      font-size: 14px;
+      font-weight: 700;
+      color: #00e676;
+    }
+    .match-price.dim { color: #666; }
+    .match-copies {
+      font-size: 9px;
+      color: #bbb;
+    }
+
+    .cheapest-badge {
+      position: absolute;
+      top: -1px;
+      right: 8px;
+      font-size: 8px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      padding: 2px 6px;
+      border-radius: 0 0 4px 4px;
+      background: rgba(0,230,118,.2);
+      color: #00e676;
+    }
+
+    /* -- note -- */
+    .note {
+      font-size: 9px; color: #999; margin-top: 12px; text-align: center;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <div class="hdr">
+    <img src="icons/icon48.png" alt="">
+    <h1>Discogs Preview</h1>
+    <a class="change-token" id="change-token" style="display:none">⚙ Token</a>
+  </div>
+
+  <!-- Token Setup (first-time only) -->
+  <div class="setup" id="setup">
+    <div class="setup-label">Discogs API Token</div>
+    <div class="setup-row">
+      <input type="text" id="token" placeholder="Paste your token here…" spellcheck="false" autocomplete="off">
+      <button class="btn" id="save">Save</button>
+    </div>
+    <div class="setup-hint">
+      Generate one at <a href="https://www.discogs.com/settings/developers" target="_blank" rel="noopener">discogs.com/settings/developers</a>
+    </div>
+  </div>
+
+  <!-- Not on YouTube -->
+  <div class="not-yt hidden" id="not-yt">
+    🎵 Navigate to a YouTube music video and click here to see Discogs pricing.
+  </div>
+
+  <!-- Loading -->
+  <div class="loading hidden" id="loading">
+    <div class="spinner"></div>
+    <span>Searching Discogs…</span>
+  </div>
+
+  <!-- Error -->
+  <div class="error-msg hidden" id="error"></div>
+
+  <!-- Results -->
+  <div class="main hidden" id="main">
+    <!-- Release header -->
+    <div class="release">
+      <img class="release-thumb" id="thumb" src="" alt="">
+      <div class="release-meta">
+        <div class="release-title" id="r-title"></div>
+        <div class="release-artist" id="r-artist"></div>
+        <a class="release-link" id="r-link" href="#" target="_blank" rel="noopener noreferrer">
+          View all copies on Discogs ↗
+        </a>
+      </div>
+    </div>
+
+    <!-- Global stats -->
+    <div class="section-divider" id="stats-divider">All Vinyl — Worldwide</div>
+    <div class="stats" id="global-stats"></div>
+
+    <!-- Match list -->
+    <div id="match-list"></div>
+
+    <!-- Toggles -->
+    <div class="toggle-row">
+      <label class="switch">
+        <input type="checkbox" id="us-toggle">
+        <span class="slider"></span>
+      </label>
+      <span class="toggle-text">Ships from US only</span>
+    </div>
+    <div class="toggle-row" style="padding-top:2px;">
+      <label class="switch">
+        <input type="checkbox" id="vg-toggle">
+        <span class="slider"></span>
+      </label>
+      <span class="toggle-text">VG+ or better only</span>
+    </div>
+
+    <div class="note">
+      Prices are estimates based on Discogs marketplace data.<br>
+      Click the link above for exact listings with shipping &amp; grading.
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
