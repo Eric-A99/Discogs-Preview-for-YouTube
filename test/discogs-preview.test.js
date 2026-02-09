@@ -489,8 +489,14 @@ describe('extractArtistNames()', () => {
 // ═══════════════════════════════════════════════════════════════
 
 describe('makeSellUrl()', () => {
-  it('uses master_id when available', () => {
+  it('prefers releaseId over masterId for accurate per-release counts', () => {
     const url = h.makeSellUrl({ masterId: 123, releaseId: 456 }, 'query');
+    assert.ok(url.includes('/sell/release/456'), 'should use release URL when releaseId available');
+    assert.ok(!url.includes('master_id'), 'should not use master URL');
+  });
+
+  it('falls back to master_id when no releaseId', () => {
+    const url = h.makeSellUrl({ masterId: 123, releaseId: null }, 'query');
     assert.ok(url.includes('master_id=123'));
     assert.ok(url.includes('format=Vinyl'));
   });
@@ -569,8 +575,8 @@ describe('parseSellPageHtml()', () => {
       // No "of X" pagination (single page of results) and no "no results" message
       const html = `
         <div>Some header</div>
-        <div>Media Condition: VG+</div><span>$20.00</span>
-        <div>Media Condition: NM</div><span>$30.00</span>
+        <div>Media Condition: Very Good Plus (VG+)</div><div>Sleeve Condition: Very Good (VG)</div><span>$20.00</span><div>Ships From: Germany</div>
+        <div>Media Condition: Near Mint (NM or M-)</div><div>Sleeve Condition: Near Mint (NM or M-)</div><span>$30.00</span><div>Ships From: Germany</div>
       `;
       const r = h.parseSellPageHtml(html);
       assert.equal(r.numForSale, 2);
@@ -580,13 +586,13 @@ describe('parseSellPageHtml()', () => {
   // ─── Price extraction (the BIG category of bugs) ───
   describe('price extraction', () => {
     it('extracts simple listing price', () => {
-      const html = '1 - 25 of 50 Media Condition: VG+ $25.00';
+      const html = '1 - 25 of 50 Media Condition: Very Good Plus (VG+) Sleeve Condition: VG $25.00 Ships From: Germany';
       const r = h.parseSellPageHtml(html);
       assert.equal(r.lowestPrice, 25.00);
     });
 
     it('extracts price with comma', () => {
-      const html = '1 - 25 of 50 Media Condition: VG+ $1,250.00';
+      const html = '1 - 25 of 50 Media Condition: Very Good Plus (VG+) Sleeve Condition: VG $1,250.00 Ships From: Germany';
       const r = h.parseSellPageHtml(html);
       assert.equal(r.lowestPrice, 1250.00);
     });
@@ -595,10 +601,12 @@ describe('parseSellPageHtml()', () => {
       // Bug: "+$6.00 shipping" was previously matched as lowest price
       const html = `
         1 - 25 of 50
-        Media Condition: VG+
+        Media Condition: Very Good Plus (VG+)
+        Sleeve Condition: VG
         $50.00
         +$6.00 shipping
         $56.00
+        Ships From: Germany
       `;
       const r = h.parseSellPageHtml(html);
       assert.equal(r.lowestPrice, 50.00);
@@ -607,10 +615,12 @@ describe('parseSellPageHtml()', () => {
     it('skips "about $X" currency conversion', () => {
       const html = `
         1 - 25 of 50
-        Media Condition: VG+
+        Media Condition: Very Good Plus (VG+)
+        Sleeve Condition: VG
         €80.00
         about $94.12
         $50.00
+        Ships From: Germany
       `;
       const r = h.parseSellPageHtml(html);
       assert.equal(r.lowestPrice, 50.00);
@@ -619,10 +629,12 @@ describe('parseSellPageHtml()', () => {
     it('skips "shipping $X" combined total', () => {
       const html = `
         1 - 25 of 50
-        Media Condition: VG+
+        Media Condition: Very Good Plus (VG+)
+        Sleeve Condition: VG
         $40.00
         +$5.00
         shipping $45.00
+        Ships From: Germany
       `;
       const r = h.parseSellPageHtml(html);
       assert.equal(r.lowestPrice, 40.00);
@@ -637,13 +649,85 @@ describe('parseSellPageHtml()', () => {
         </div>
         1 - 25 of 50
         <div class="listing">
-          Media Condition: VG+
+          Media Condition: Very Good Plus (VG+)
+          Sleeve Condition: VG
           <span class="price">$25.00</span>
           <span>+$4.00 shipping</span>
+          Ships From: Germany
         </div>
       `;
       const r = h.parseSellPageHtml(html);
       assert.equal(r.lowestPrice, 25.00);
+    });
+
+    it('sidebar "Media Condition" heading does NOT create a phantom listing', () => {
+      // Real Discogs sell pages have a sidebar filter section that contains
+      // "Media Condition:" labels followed by grade names.  When we split on
+      // "Media Condition:", this creates phantom blocks.  We skip them
+      // because they lack "Sleeve Condition" (only real listings have it).
+      // NOTE: Discogs does NOT include pagination text in server-rendered
+      // HTML for single-page results (≤25 items) — it's client-rendered
+      // via JavaScript.  So hasPagination is false in this scenario.
+      const html = `
+        <div class="sidebar-filters">
+          Media Condition:
+          <a>Very Good Plus (VG+)</a><span>5</span>
+          Media Condition:
+          <a>Good (G)</a><span>1</span>
+          <a>Near Mint (NM or M-)</a><span>1</span>
+        </div>
+        <div class="listing">
+          Media Condition: Good (G)
+          Sleeve Condition: Fair (F)
+          $1.99
+          Ships From: Germany
+        </div>
+        <div class="listing">
+          Media Condition: Very Good Plus (VG+)
+          Sleeve Condition: Very Good Plus (VG+)
+          $3.00
+          Ships From: Germany
+        </div>
+        <div class="listing">
+          Media Condition: Very Good Plus (VG+)
+          Sleeve Condition: Very Good Plus (VG+)
+          $3.00
+          Ships From: Germany
+        </div>
+        <div class="listing">
+          Media Condition: Very Good Plus (VG+)
+          Sleeve Condition: Very Good Plus (VG+)
+          $3.00
+          Ships From: Germany
+        </div>
+        <div class="listing">
+          Media Condition: Very Good Plus (VG+)
+          Sleeve Condition: Very Good (VG)
+          $4.00
+          Ships From: Germany
+        </div>
+        <div class="listing">
+          Media Condition: Very Good Plus (VG+)
+          Sleeve Condition: Very Good (VG)
+          $15.84
+          Ships From: Germany
+        </div>
+        <div class="listing">
+          Media Condition: Near Mint (NM or M-)
+          Sleeve Condition: Near Mint (NM or M-)
+          $18.00
+          Ships From: Germany
+        </div>
+      `;
+      // Unfiltered: 7 listings, not 8 (sidebar phantom must be skipped)
+      const r = h.parseSellPageHtml(html);
+      assert.equal(r.numForSale, 7);
+      assert.equal(r.lowestPrice, 1.99);
+
+      // Filtered VG+: 6 listings (the Good (G) one is excluded)
+      const f = h.parseFilteredPage(html, false, true);
+      assert.equal(f.matched, 6);
+      assert.equal(f.lowest, 3.00);
     });
 
     it('returns null price when 0 items for sale — THE $1.01 BUG', () => {
@@ -665,12 +749,16 @@ describe('parseSellPageHtml()', () => {
     it('takes FIRST valid price (page is sorted price-asc)', () => {
       const html = `
         1 - 25 of 100
-        Media Condition: VG+
+        Media Condition: Very Good Plus (VG+)
+        Sleeve Condition: VG
         $15.00
         +$4.00 shipping $19.00
-        Media Condition: NM
+        Ships From: Germany
+        Media Condition: Near Mint (NM or M-)
+        Sleeve Condition: VG
         $25.00
         +$5.00 shipping $30.00
+        Ships From: Germany
       `;
       const r = h.parseSellPageHtml(html);
       assert.equal(r.lowestPrice, 15.00);
@@ -680,20 +768,24 @@ describe('parseSellPageHtml()', () => {
       // First listing is foreign (euro + about), second is domestic ($)
       const html = `
         1 - 25 of 50
-        Media Condition: VG+
+        Media Condition: Very Good Plus (VG+)
+        Sleeve Condition: VG
         €80.00
         about $94.12
         + shipping
-        Media Condition: VG+
+        Ships From: Germany
+        Media Condition: Very Good Plus (VG+)
+        Sleeve Condition: VG
         $50.00
         +$6.00 shipping $56.00
+        Ships From: Germany
       `;
       const r = h.parseSellPageHtml(html);
       assert.equal(r.lowestPrice, 50.00);
     });
 
-    it('handles "media-condition" (lowercase) as fallback marker', () => {
-      const html = '1 - 25 of 10 <span class="media-condition">VG+</span> $30.00';
+    it('handles "Media-Condition:" (hyphenated) as marker', () => {
+      const html = '1 - 25 of 10 Media-Condition: Very Good Plus (VG+) Sleeve Condition: VG $30.00 Ships From: Germany';
       const r = h.parseSellPageHtml(html);
       assert.equal(r.lowestPrice, 30.00);
     });
@@ -719,20 +811,26 @@ describe('parseSellPageHtml()', () => {
         <div class="pagination">1 - 25 of 342</div>
         <div class="listing">
           <div>Media Condition: Very Good Plus (VG+)</div>
+          <div>Sleeve Condition: Very Good (VG)</div>
           <span class="price">$19.99</span>
           <span class="shipping">+$4.50 shipping</span>
           <span class="total">$24.49</span>
+          Ships From: Germany
         </div>
         <div class="listing">
           <div>Media Condition: Near Mint (NM or M-)</div>
+          <div>Sleeve Condition: Very Good (VG)</div>
           <span class="converted">€25.00 about $28.12</span>
           <span class="shipping">+ shipping</span>
+          Ships From: Germany
         </div>
         <div class="listing">
           <div>Media Condition: Very Good (VG)</div>
+          <div>Sleeve Condition: Good (G)</div>
           <span class="price">$22.00</span>
           <span class="shipping">+$5.00 shipping</span>
           <span class="total">shipping $27.00</span>
+          Ships From: Germany
         </div>
         </html>
       `;
@@ -745,8 +843,10 @@ describe('parseSellPageHtml()', () => {
       const html = `
         <div>1 result</div>
         <div>Media Condition: Near Mint (NM or M-)</div>
+        <div>Sleeve Condition: Very Good (VG)</div>
         <span>$75.00</span>
         <span>+$8.00 shipping</span>
+        Ships From: Germany
       `;
       // No "of X" → falls back to counting "Media Condition"
       const r = h.parseSellPageHtml(html);
@@ -882,21 +982,32 @@ describe('buildFilteredUrl_popup() — popup.js version', () => {
     assert.ok(url.includes('ships_from=United+States'));
   });
 
-  it('does NOT add VG+ param to URL (done in code)', () => {
-    const url = h.buildFilteredUrl_popup('https://www.discogs.com/sell/list?master_id=123', false, true);
-    // VG+ filtering is done via subtraction, not URL param
-    assert.ok(!url.includes('condition'));
+  it('releaseId rewrites URL to release sell page', () => {
+    const url = h.buildFilteredUrl_popup('https://www.discogs.com/sell/list?master_id=123', false, false, 456);
+    assert.ok(url.startsWith('https://www.discogs.com/sell/release/456'), 'should use release URL');
+    assert.ok(!url.includes('condition'), 'condition params are broken on Discogs');
   });
 
-  it('handles both US and VG+ flags', () => {
-    const url = h.buildFilteredUrl_popup('https://www.discogs.com/sell/list?master_id=123', true, true);
+  it('VG+ without releaseId keeps master URL, no condition params', () => {
+    const url = h.buildFilteredUrl_popup('https://www.discogs.com/sell/list?master_id=123', false, true);
+    assert.ok(url.includes('master_id=123'), 'should keep master URL');
+    assert.ok(!url.includes('condition'), 'condition params are broken on Discogs');
+  });
+
+  it('handles both US and VG+ flags with releaseId', () => {
+    const url = h.buildFilteredUrl_popup('https://www.discogs.com/sell/list?master_id=123', true, true, 789);
+    assert.ok(url.startsWith('https://www.discogs.com/sell/release/789'), 'should use release URL');
     assert.ok(url.includes('ships_from=United+States'));
-    // But no condition param
-    assert.ok(!url.includes('condition'));
+    assert.ok(!url.includes('condition'), 'condition params are broken on Discogs');
   });
 
   it('returns null for null input', () => {
     assert.equal(h.buildFilteredUrl_popup(null, true, true), null);
+  });
+
+  it('no filters and no releaseId returns url unchanged', () => {
+    const base = 'https://www.discogs.com/sell/list?master_id=123';
+    assert.equal(h.buildFilteredUrl_popup(base, false, false), base);
   });
 });
 
@@ -1115,7 +1226,7 @@ describe('regression tests', () => {
   });
 
   it('BUG: shipping cost $6 shown as lowest price', () => {
-    const html = `1 - 25 of 50 Media Condition: VG+ $50.00 +$6.00 shipping $56.00`;
+    const html = `1 - 25 of 50 Media Condition: Very Good Plus (VG+) Sleeve Condition: VG $50.00 +$6.00 shipping $56.00 Ships From: Germany`;
     const r = h.parseSellPageHtml(html);
     assert.equal(r.lowestPrice, 50.00);
     assert.notEqual(r.lowestPrice, 6.00);
@@ -1126,8 +1237,10 @@ describe('regression tests', () => {
       <div>More than $40</div>
       <div>Price: $0 - $10</div>
       1 - 25 of 50
-      Media Condition: VG+
+      Media Condition: Very Good Plus (VG+)
+      Sleeve Condition: VG
       $25.00
+      Ships From: Germany
     `;
     const r = h.parseSellPageHtml(html);
     assert.equal(r.lowestPrice, 25.00);
@@ -1154,7 +1267,7 @@ describe('regression tests', () => {
   });
 
   it('BUG: "about $94.12" currency conversion shown as listing price', () => {
-    const html = `1 - 25 of 50 Media Condition: VG+ €80.00 about $94.12 $50.00`;
+    const html = `1 - 25 of 50 Media Condition: Very Good Plus (VG+) Sleeve Condition: VG €80.00 about $94.12 $50.00 Ships From: Germany`;
     const r = h.parseSellPageHtml(html);
     assert.equal(r.lowestPrice, 50.00);
     assert.notEqual(r.lowestPrice, 94.12);
@@ -1169,7 +1282,7 @@ describe('regression tests', () => {
   });
 
   it('BUG: "shipping $45.00" combined total shown as listing price', () => {
-    const html = `1 - 25 of 10 Media Condition: VG+ $40.00 +$5.00 shipping $45.00`;
+    const html = `1 - 25 of 10 Media Condition: Very Good Plus (VG+) Sleeve Condition: VG $40.00 +$5.00 shipping $45.00 Ships From: Germany`;
     const r = h.parseSellPageHtml(html);
     assert.equal(r.lowestPrice, 40.00);
     assert.notEqual(r.lowestPrice, 45.00);
@@ -1187,20 +1300,29 @@ describe('regression tests', () => {
       <div class="listing">
         Media Condition:
         <span>Good Plus (G+)</span>
+        Sleeve Condition:
+        <span>Fair (F)</span>
         <span class="price">$8.67</span>
         <span>+$7.50 shipping</span>
+        Ships From: Germany
       </div>
       <div class="listing">
         Media Condition:
         <span>Very Good Plus (VG+)</span>
+        Sleeve Condition:
+        <span>Very Good (VG)</span>
         <span class="price">$15.00</span>
         <span>+$6.00 shipping</span>
+        Ships From: Germany
       </div>
       <div class="listing">
         Media Condition:
         <span>Very Good Plus (VG+)</span>
+        Sleeve Condition:
+        <span>Very Good (VG)</span>
         <span class="price">$24.00</span>
         <span>+$8.00 shipping</span>
+        Ships From: Germany
       </div>
     `;
     const r = h.parseSellPageHtml(html);
@@ -1226,18 +1348,21 @@ describe('regression tests', () => {
       <div class="pagination">1 \u2013 3 of 3</div>
       <div class="listing">
         Media Condition: Fair (F)
+        Sleeve Condition: Fair (F)
         <span class="price">$8.67</span>
         <span>+$7.50 shipping</span>
         Ships From:  United States
       </div>
       <div class="listing">
         Media Condition: Very Good Plus (VG+)
+        Sleeve Condition: Very Good (VG)
         <span class="price">$12.00</span>
         <span>+$10.00 shipping</span>
         Ships From:  Germany
       </div>
       <div class="listing">
         Media Condition: Near Mint (NM or M-)
+        Sleeve Condition: Very Good Plus (VG+)
         <span class="price">$18.00</span>
         <span>+$12.00 shipping</span>
         Ships From:  Japan
@@ -1378,19 +1503,19 @@ describe('edge case stress tests', () => {
     });
 
     it('handles price of $0.01 (penny listing)', () => {
-      const html = '1 - 25 of 5 Media Condition: VG $0.01 +$4.00 shipping';
+      const html = '1 - 25 of 5 Media Condition: Very Good (VG) Sleeve Condition: VG $0.01 +$4.00 shipping Ships From: Germany';
       const r = h.parseSellPageHtml(html);
       assert.equal(r.lowestPrice, 0.01);
     });
 
     it('handles price of $9,999.99 (high-value listing)', () => {
-      const html = '1 - 25 of 1 Media Condition: M $9,999.99';
+      const html = '1 - 25 of 1 Media Condition: Mint (M) Sleeve Condition: VG $9,999.99 Ships From: Germany';
       const r = h.parseSellPageHtml(html);
       assert.equal(r.lowestPrice, 9999.99);
     });
 
     it('handles malformed "of" count gracefully', () => {
-      const html = 'of abc Media Condition: VG $10.00';
+      const html = 'of abc Media Condition: Very Good (VG) Sleeve Condition: VG $10.00 Ships From: Germany';
       const r = h.parseSellPageHtml(html);
       // No "of X" match (abc has no digits), no "no results" message
       // → falls back to counting "Media Condition" occurrences = 1
@@ -1435,24 +1560,33 @@ describe('edge case stress tests', () => {
               <span>Media Condition:</span>
               <span>Good Plus (G+)</span>
             </span>
+            <span>Sleeve Condition:</span>
+            <span>Fair (F)</span>
             <span class="price">$8.67</span>
             <span>+$7.50 shipping</span>
+            Ships From: Germany
           </div>
           <div class="item">
             <span class="item_condition">
               <span>Media Condition:</span>
               <span>Very Good Plus (VG+)</span>
             </span>
+            <span>Sleeve Condition:</span>
+            <span>Very Good (VG)</span>
             <span class="price">$15.00</span>
             <span>+$6.00 shipping</span>
+            Ships From: Germany
           </div>
           <div class="item">
             <span class="item_condition">
               <span>Media Condition:</span>
               <span>Very Good Plus (VG+)</span>
             </span>
+            <span>Sleeve Condition:</span>
+            <span>Very Good (VG)</span>
             <span class="price">$24.00</span>
             <span>+$8.00 shipping</span>
+            Ships From: Germany
           </div>
         </div>
         </html>
@@ -1472,11 +1606,11 @@ describe('edge case stress tests', () => {
     it('all-NM page should have 100% VG+ or better', () => {
       const html = `
         1 - 5 of 5
-        Media Condition: Near Mint (NM or M-) $20.00
-        Media Condition: Near Mint (NM or M-) $25.00
-        Media Condition: Near Mint (NM or M-) $30.00
-        Media Condition: Near Mint (NM or M-) $35.00
-        Media Condition: Near Mint (NM or M-) $40.00
+        Media Condition: Near Mint (NM or M-) Sleeve Condition: Near Mint (NM or M-) $20.00 Ships From: Germany
+        Media Condition: Near Mint (NM or M-) Sleeve Condition: Near Mint (NM or M-) $25.00 Ships From: Germany
+        Media Condition: Near Mint (NM or M-) Sleeve Condition: Near Mint (NM or M-) $30.00 Ships From: Germany
+        Media Condition: Near Mint (NM or M-) Sleeve Condition: Near Mint (NM or M-) $35.00 Ships From: Germany
+        Media Condition: Near Mint (NM or M-) Sleeve Condition: Near Mint (NM or M-) $40.00 Ships From: Germany
       `;
       const r = h.parseSellPageHtml(html);
       assert.equal(r.numForSale, 5);
@@ -1487,9 +1621,9 @@ describe('edge case stress tests', () => {
     it('all-Fair page should have 0% VG+ or better', () => {
       const html = `
         1 - 3 of 3
-        Media Condition: Fair (F) $5.00
-        Media Condition: Fair (F) $8.00
-        Media Condition: Fair (F) $10.00
+        Media Condition: Fair (F) Sleeve Condition: Poor (P) $5.00 Ships From: Germany
+        Media Condition: Fair (F) Sleeve Condition: Poor (P) $8.00 Ships From: Germany
+        Media Condition: Fair (F) Sleeve Condition: Poor (P) $10.00 Ships From: Germany
       `;
       const r = h.parseSellPageHtml(html);
       assert.equal(r.numForSale, 3);
@@ -1499,11 +1633,11 @@ describe('edge case stress tests', () => {
     it('mixed-condition page extracts correct total', () => {
       const html = `
         1 - 25 of 150
-        Media Condition: Very Good (VG) $10.00
-        Media Condition: Very Good Plus (VG+) $18.00
-        Media Condition: Near Mint (NM or M-) $25.00
-        Media Condition: Good (G) $5.00
-        Media Condition: Mint (M) $50.00
+        Media Condition: Very Good (VG) Sleeve Condition: Good (G) $10.00 Ships From: Germany
+        Media Condition: Very Good Plus (VG+) Sleeve Condition: Very Good (VG) $18.00 Ships From: Germany
+        Media Condition: Near Mint (NM or M-) Sleeve Condition: Very Good Plus (VG+) $25.00 Ships From: Germany
+        Media Condition: Good (G) Sleeve Condition: Fair (F) $5.00 Ships From: Germany
+        Media Condition: Mint (M) Sleeve Condition: Near Mint (NM or M-) $50.00 Ships From: Germany
       `;
       const r = h.parseSellPageHtml(html);
       assert.equal(r.numForSale, 150);
@@ -1543,23 +1677,101 @@ describe('edge case stress tests', () => {
     });
   });
 
+  describe('VG+ filter uses media condition only (ignores sleeve)', () => {
+    it('BUG: media Good + sleeve VG+ must be filtered OUT', () => {
+      const html = `
+        1 - 1 of 1
+        Media Condition:
+        <span>Good (G)</span>
+        Sleeve Condition:
+        <span>Very Good Plus (VG+)</span>
+        <span class="price">$4.00</span>
+        Ships From: Germany
+      `;
+      const r = h.parseFilteredPage(html, false, true);
+      assert.equal(r.matched, 0, 'Good (G) media should not pass VG+ filter');
+      assert.equal(r.prices.length, 0);
+    });
+
+    it('media VG+ + sleeve Good must pass VG+ filter', () => {
+      const html = `
+        1 - 1 of 1
+        Media Condition:
+        <span>Very Good Plus (VG+)</span>
+        Sleeve Condition:
+        <span>Good (G)</span>
+        <span class="price">$12.00</span>
+        Ships From: Germany
+      `;
+      const r = h.parseFilteredPage(html, false, true);
+      assert.equal(r.matched, 1, 'VG+ media should pass regardless of sleeve');
+      assert.equal(r.prices.length, 1);
+      assert.equal(r.lowest, 12.00);
+    });
+
+    it('media NM + sleeve Fair must pass VG+ filter', () => {
+      const html = `
+        1 - 1 of 1
+        Media Condition:
+        <span>Near Mint (NM or M-)</span>
+        Sleeve Condition:
+        <span>Fair (F)</span>
+        <span class="price">$25.00</span>
+        Ships From: Germany
+      `;
+      const r = h.parseFilteredPage(html, false, true);
+      assert.equal(r.matched, 1, 'NM media should pass regardless of sleeve');
+      assert.equal(r.prices.length, 1);
+      assert.equal(r.lowest, 25.00);
+    });
+
+    it('mixed page: filters out only sub-VG+ media conditions', () => {
+      const html = `
+        1 - 3 of 3
+        Media Condition:
+        <span>Good (G)</span>
+        Sleeve Condition:
+        <span>Very Good Plus (VG+)</span>
+        <span class="price">$4.00</span>
+        Ships From: Germany
+        Media Condition:
+        <span>Very Good Plus (VG+)</span>
+        Sleeve Condition:
+        <span>Very Good (VG)</span>
+        <span class="price">$15.00</span>
+        Ships From: Germany
+        Media Condition:
+        <span>Fair (F)</span>
+        Sleeve Condition:
+        <span>Near Mint (NM or M-)</span>
+        <span class="price">$2.00</span>
+        Ships From: Germany
+      `;
+      const r = h.parseFilteredPage(html, false, true);
+      assert.equal(r.matched, 1, 'only the VG+ media listing should pass');
+      assert.equal(r.lowest, 15.00);
+    });
+  });
+
   describe('Filtered price consistency', () => {
     // These tests verify the popup.js showFilteredData logic:
     // - VG+ filter: ALWAYS use scraped prices (global API includes all conditions)
     // - US-only filter (no VG+): fall back to global API prices when count matches
 
     // Helper: simulates the useScrapedPrices decision from popup.js
-    function useScraped(vg, cappedTotal, gNumForSale) {
-      return vg || cappedTotal < (gNumForSale || 0);
+    // unfilteredRef = scrapedTotal (from sell page) or g.numForSale (API fallback)
+    function useScraped(vg, cappedTotal, unfilteredRef) {
+      return vg || cappedTotal < unfilteredRef;
     }
 
     it('VG+ filter: always use scraped prices even when count matches global', () => {
       // Bug case: 10 global, 10 VG+ filtered, but global lowest ($2.35) is a VG copy
       const vg = true;
       const g = { numForSale: 10, lowestPrice: 2.35, medianPrice: 5.00 };
-      const fData = { numForSale: 10, lowestPrice: 3.27, medianPrice: 6.00 };
-      const cappedTotal = Math.min(fData.numForSale, g.numForSale || Infinity);
-      assert.equal(useScraped(vg, cappedTotal, g.numForSale), true, 'VG+ must always use scraped');
+      const fData = { numForSale: 10, scrapedTotal: 10, lowestPrice: 3.27, medianPrice: 6.00 };
+      const unfilteredRef = fData.scrapedTotal || g.numForSale || 0;
+      const cappedTotal = Math.min(fData.numForSale, unfilteredRef);
+      assert.equal(useScraped(vg, cappedTotal, unfilteredRef), true, 'VG+ must always use scraped');
       const displayLowest = fData.lowestPrice != null ? fData.lowestPrice : g.lowestPrice;
       assert.equal(displayLowest, 3.27, 'should use scraped VG+ lowest, not global');
     });
@@ -1567,9 +1779,10 @@ describe('edge case stress tests', () => {
     it('VG+ filter: use scraped prices when count narrows too', () => {
       const vg = true;
       const g = { numForSale: 10, lowestPrice: 2.35, medianPrice: 5.00 };
-      const fData = { numForSale: 7, lowestPrice: 4.00, medianPrice: 8.00 };
-      const cappedTotal = Math.min(fData.numForSale, g.numForSale || Infinity);
-      assert.equal(useScraped(vg, cappedTotal, g.numForSale), true);
+      const fData = { numForSale: 7, scrapedTotal: 10, lowestPrice: 4.00, medianPrice: 8.00 };
+      const unfilteredRef = fData.scrapedTotal || g.numForSale || 0;
+      const cappedTotal = Math.min(fData.numForSale, unfilteredRef);
+      assert.equal(useScraped(vg, cappedTotal, unfilteredRef), true);
       assert.equal(fData.lowestPrice, 4.00, 'should use scraped VG+ lowest');
       assert.equal(fData.medianPrice, 8.00, 'should use scraped VG+ median');
     });
@@ -1577,9 +1790,10 @@ describe('edge case stress tests', () => {
     it('US-only (no VG+): use global prices when count matches', () => {
       const vg = false;
       const g = { numForSale: 5, lowestPrice: 12.68, medianPrice: 12.68 };
-      const fData = { numForSale: 5, lowestPrice: 29.72, medianPrice: 29.72 };
-      const cappedTotal = Math.min(fData.numForSale, g.numForSale || Infinity);
-      assert.equal(useScraped(vg, cappedTotal, g.numForSale), false, 'US-only with same count uses global');
+      const fData = { numForSale: 5, scrapedTotal: 5, lowestPrice: 29.72, medianPrice: 29.72 };
+      const unfilteredRef = fData.scrapedTotal || g.numForSale || 0;
+      const cappedTotal = Math.min(fData.numForSale, unfilteredRef);
+      assert.equal(useScraped(vg, cappedTotal, unfilteredRef), false, 'US-only with same count uses global');
       const displayLowest = g.lowestPrice;
       assert.equal(displayLowest, 12.68, 'should use global lowest');
     });
@@ -1587,9 +1801,10 @@ describe('edge case stress tests', () => {
     it('US-only (no VG+): use scraped prices when count narrows', () => {
       const vg = false;
       const g = { numForSale: 10, lowestPrice: 8.00, medianPrice: 15.00 };
-      const fData = { numForSale: 3, lowestPrice: 20.00, medianPrice: 25.00 };
-      const cappedTotal = Math.min(fData.numForSale, g.numForSale || Infinity);
-      assert.equal(useScraped(vg, cappedTotal, g.numForSale), true, 'US-only with fewer copies uses scraped');
+      const fData = { numForSale: 3, scrapedTotal: 10, lowestPrice: 20.00, medianPrice: 25.00 };
+      const unfilteredRef = fData.scrapedTotal || g.numForSale || 0;
+      const cappedTotal = Math.min(fData.numForSale, unfilteredRef);
+      assert.equal(useScraped(vg, cappedTotal, unfilteredRef), true, 'US-only with fewer copies uses scraped');
       assert.equal(fData.lowestPrice, 20.00, 'should use filtered lowest');
       assert.equal(fData.medianPrice, 25.00, 'should use filtered median');
     });
@@ -1597,37 +1812,44 @@ describe('edge case stress tests', () => {
     it('US + VG+ combined: always use scraped prices', () => {
       const vg = true;
       const g = { numForSale: 5, lowestPrice: 10.00, medianPrice: 14.00 };
-      const fData = { numForSale: 5, lowestPrice: 15.00, medianPrice: 18.00 };
-      const cappedTotal = Math.min(fData.numForSale, g.numForSale || Infinity);
-      assert.equal(useScraped(vg, cappedTotal, g.numForSale), true, 'VG+ always forces scraped');
+      const fData = { numForSale: 5, scrapedTotal: 5, lowestPrice: 15.00, medianPrice: 18.00 };
+      const unfilteredRef = fData.scrapedTotal || g.numForSale || 0;
+      const cappedTotal = Math.min(fData.numForSale, unfilteredRef);
+      assert.equal(useScraped(vg, cappedTotal, unfilteredRef), true, 'VG+ always forces scraped');
       assert.equal(fData.lowestPrice, 15.00, 'should use scraped price');
     });
 
-    it('when filtered count is capped to global (US-only), use global prices', () => {
-      const vg = false;
-      const g = { numForSale: 5, lowestPrice: 10.00, medianPrice: 14.00 };
-      const fData = { numForSale: 6, lowestPrice: 29.72, medianPrice: 29.72 };
-      const cappedTotal = Math.min(fData.numForSale, g.numForSale || Infinity);
-      assert.equal(cappedTotal, 5, 'should be capped at global count');
-      assert.equal(useScraped(vg, cappedTotal, g.numForSale), false, 'capped == global with no VG+ uses global');
+    it('when API undercounts: scrapedTotal is the reliable reference', () => {
+      // Bug case from Felka: API says 8, sell page has 10, VG+ filter matches 8
+      // Old code: cappedTotal = min(8, 8) = 8, no change visible
+      // New code: unfilteredRef = scrapedTotal(10), cappedTotal = min(8, 10) = 8
+      const vg = true;
+      const g = { numForSale: 8, lowestPrice: 4.00, medianPrice: 7.72 };
+      const fData = { numForSale: 8, scrapedTotal: 10, lowestPrice: 4.00, medianPrice: 4.00 };
+      const unfilteredRef = fData.scrapedTotal || g.numForSale || 0;
+      const cappedTotal = Math.min(fData.numForSale, unfilteredRef);
+      assert.equal(cappedTotal, 8, 'filtered 8 of 10 = 8');
+      assert.equal(useScraped(vg, cappedTotal, unfilteredRef), true, 'VG+ always uses scraped');
     });
 
     it('when filtered count is capped but VG+ on, still use scraped', () => {
       const vg = true;
       const g = { numForSale: 5, lowestPrice: 2.00, medianPrice: 5.00 };
-      const fData = { numForSale: 6, lowestPrice: 4.00, medianPrice: 7.00 };
-      const cappedTotal = Math.min(fData.numForSale, g.numForSale || Infinity);
+      const fData = { numForSale: 6, scrapedTotal: 5, lowestPrice: 4.00, medianPrice: 7.00 };
+      const unfilteredRef = fData.scrapedTotal || g.numForSale || 0;
+      const cappedTotal = Math.min(fData.numForSale, unfilteredRef);
       assert.equal(cappedTotal, 5);
-      assert.equal(useScraped(vg, cappedTotal, g.numForSale), true, 'VG+ overrides count match');
+      assert.equal(useScraped(vg, cappedTotal, unfilteredRef), true, 'VG+ overrides count match');
       assert.equal(fData.lowestPrice, 4.00, 'should use scraped VG+ price');
     });
 
     it('when scraped price is null with VG+, falls back to global', () => {
       const vg = true;
       const g = { numForSale: 8, lowestPrice: 12.00, medianPrice: 18.00 };
-      const fData = { numForSale: 2, lowestPrice: null, medianPrice: null };
-      const cappedTotal = Math.min(fData.numForSale, g.numForSale || Infinity);
-      assert.equal(useScraped(vg, cappedTotal, g.numForSale), true);
+      const fData = { numForSale: 2, scrapedTotal: 8, lowestPrice: null, medianPrice: null };
+      const unfilteredRef = fData.scrapedTotal || g.numForSale || 0;
+      const cappedTotal = Math.min(fData.numForSale, unfilteredRef);
+      assert.equal(useScraped(vg, cappedTotal, unfilteredRef), true);
       const displayLowest = cappedTotal > 0
         ? (fData.lowestPrice != null ? fData.lowestPrice : g.lowestPrice)
         : null;
@@ -1637,9 +1859,10 @@ describe('edge case stress tests', () => {
     it('per-match: VG+ always uses scraped match price', () => {
       const vg = true;
       const m = { numForSale: 5, lowestPrice: 2.35 };
-      const msRaw = { numForSale: 5, lowestPrice: 3.27 };
-      const ms = { numForSale: Math.min(msRaw.numForSale, m.numForSale || Infinity), lowestPrice: msRaw.lowestPrice };
-      const useMatchScraped = vg || ms.numForSale < (m.numForSale || 0);
+      const msRaw = { numForSale: 5, scrapedTotal: 5, lowestPrice: 3.27 };
+      const msUnfiltered = msRaw.scrapedTotal || m.numForSale || 0;
+      const ms = { numForSale: Math.min(msRaw.numForSale, msUnfiltered), lowestPrice: msRaw.lowestPrice };
+      const useMatchScraped = vg || ms.numForSale < msUnfiltered;
       assert.equal(useMatchScraped, true);
       const msPrice = useMatchScraped ? ms.lowestPrice : m.lowestPrice;
       assert.equal(msPrice, 3.27, 'VG+ should use scraped match price');
@@ -1648,9 +1871,10 @@ describe('edge case stress tests', () => {
     it('per-match: US-only with same count uses global match price', () => {
       const vg = false;
       const m = { numForSale: 5, lowestPrice: 12.68 };
-      const msRaw = { numForSale: 5, lowestPrice: 29.72 };
-      const ms = { numForSale: Math.min(msRaw.numForSale, m.numForSale || Infinity), lowestPrice: msRaw.lowestPrice };
-      const useMatchScraped = vg || ms.numForSale < (m.numForSale || 0);
+      const msRaw = { numForSale: 5, scrapedTotal: 5, lowestPrice: 29.72 };
+      const msUnfiltered = msRaw.scrapedTotal || m.numForSale || 0;
+      const ms = { numForSale: Math.min(msRaw.numForSale, msUnfiltered), lowestPrice: msRaw.lowestPrice };
+      const useMatchScraped = vg || ms.numForSale < msUnfiltered;
       assert.equal(useMatchScraped, false);
       const msPrice = useMatchScraped ? ms.lowestPrice : m.lowestPrice;
       assert.equal(msPrice, 12.68, 'US-only same count should use global match price');
@@ -1658,8 +1882,9 @@ describe('edge case stress tests', () => {
 
     it('when filtered count is 0, prices should be null', () => {
       const g = { numForSale: 5, lowestPrice: 12.00, medianPrice: 18.00 };
-      const fData = { numForSale: 0, lowestPrice: null, medianPrice: null };
-      const cappedTotal = Math.min(fData.numForSale, g.numForSale || Infinity);
+      const fData = { numForSale: 0, scrapedTotal: 5, lowestPrice: null, medianPrice: null };
+      const unfilteredRef = fData.scrapedTotal || g.numForSale || 0;
+      const cappedTotal = Math.min(fData.numForSale, unfilteredRef);
       assert.equal(cappedTotal, 0);
       const displayLowest = cappedTotal > 0 ? g.lowestPrice : null;
       const displayMedian = cappedTotal > 0 ? g.medianPrice : null;

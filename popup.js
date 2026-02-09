@@ -21,6 +21,7 @@ const vgToggle     = document.getElementById('vg-toggle');
 
 let cachedQuery = null;
 let cachedData  = null;
+let selectedMatchIndex = null;  // null = show aggregate, 0..N = specific release
 
 /* -- utilities -- */
 function show(el)  { el.classList.remove('hidden'); }
@@ -83,7 +84,8 @@ function renderMatchList(container, matches) {
   for (let i = 0; i < matches.length; i++) {
     const m = matches[i];
     const isCheapest = i === 0;
-    html += `<a class="match-item${isCheapest ? ' cheapest' : ''}" href="${escHtml(m.sellUrl)}" target="_blank" rel="noopener noreferrer">`;
+    const isSelected = selectedMatchIndex === i;
+    html += `<div class="match-item${isSelected ? ' selected' : ''}" data-match-idx="${i}">`;
     if (m.thumb) {
       html += `<img class="match-thumb" src="${escHtml(m.thumb)}" alt="">`;
     } else {
@@ -91,7 +93,7 @@ function renderMatchList(container, matches) {
     }
     html += `<div class="match-info">`;
     html += `<div class="match-title">${escHtml(m.title)}</div>`;
-    html += `<div class="match-artist">${escHtml(m.artists)}${m.year ? ' (' + m.year + ')' : ''}</div>`;
+    html += `<div class="match-artist">${escHtml(m.artists)}${m.year ? ' (' + m.year + ')' : ''}${m.format ? ' · ' + escHtml(m.format) : ''}</div>`;
     html += `</div>`;
     html += `<div class="match-price-col">`;
     if (m.numForSale > 0) {
@@ -105,28 +107,90 @@ function renderMatchList(container, matches) {
     if (isCheapest) {
       html += `<div class="cheapest-badge">Best Price</div>`;
     }
-    html += `</a>`;
+    html += `</div>`;
   }
   html += '</div>';
   container.innerHTML = html;
+  bindMatchClicks(container);
 }
 
-function buildFilteredUrl(url, usOnly, vgPlus) {
+function bindMatchClicks(container) {
+  container.querySelectorAll('.match-item[data-match-idx]').forEach(el => {
+    el.addEventListener('click', () => {
+      const idx = parseInt(el.dataset.matchIdx, 10);
+      selectMatch(idx);
+    });
+  });
+}
+
+function selectMatch(idx) {
+  if (!cachedData) return;
+  const g = cachedData.global;
+  const matches = g.matches || [];
+  if (idx < 0 || idx >= matches.length) return;
+
+  // Toggle: clicking the already-selected release deselects it
+  if (selectedMatchIndex === idx) {
+    selectedMatchIndex = null;
+  } else {
+    selectedMatchIndex = idx;
+  }
+
+  updateHeaderForSelection();
+
+  // Re-apply current filters (or unfiltered state)
+  // Cache keys include selection index, so no need to clear old caches
+  applyFilters();
+}
+
+function updateHeaderForSelection() {
+  if (!cachedData) return;
+  const g = cachedData.global;
+  const matches = g.matches || [];
+  const us = usToggle.checked;
+  const vg = vgToggle.checked;
+
+  if (selectedMatchIndex != null && selectedMatchIndex < matches.length) {
+    const m = matches[selectedMatchIndex];
+    if (m.thumb) { thumbEl.src = m.thumb; thumbEl.style.display = ''; }
+    else         { thumbEl.style.display = 'none'; }
+    rTitle.textContent = m.title;
+    const fmtStr = m.format ? ' · ' + escHtml(m.format) : '';
+    rArtist.innerHTML  = escHtml(m.artists) + ' <span class="release-year">(' + (m.year || '?') + ')</span>' + fmtStr;
+    rLink.href         = buildFilteredUrl(m.sellUrl, us, vg, m.releaseId);
+    rLink.textContent  = filterLinkText();
+  } else {
+    // Back to aggregate / primary
+    const primary = matches.length > 0 ? matches[0] : g;
+    if (primary.thumb) { thumbEl.src = primary.thumb; thumbEl.style.display = ''; }
+    else               { thumbEl.style.display = 'none'; }
+    rTitle.textContent = primary.title;
+    rArtist.innerHTML  = escHtml(primary.artists) + ' <span class="release-year">(' + (primary.year || '?') + ')</span>';
+    rLink.href         = buildFilteredUrl(primary.sellUrl || g.sellUrl, us, vg, primary.releaseId || g.releaseId);
+    rLink.textContent  = filterLinkText();
+  }
+}
+
+function buildFilteredUrl(url, usOnly, vgPlus, releaseId) {
   if (!url) return url;
+  // When a specific release is selected, link directly to its sell page
+  if (releaseId) {
+    url = 'https://www.discogs.com/sell/release/' + releaseId + '?ev=rb&sort=price%2Casc';
+  }
   let sep = url.includes('?') ? '&' : '?';
   if (usOnly) { url += sep + 'ships_from=United+States'; sep = '&'; }
-  // Note: VG+ filtering is done in code, not via URL param
-  // (Discogs condition URL param doesn't work reliably for VG+)
+  // Note: Discogs condition URL params (e.g. condition=Very+Good+Plus+...)
+  // are broken server-side — the sidebar shows the filter but returns 0 results.
+  // VG+ filtering is handled by our scraping code instead.
   return url;
 }
 
 function filterCacheKey() {
   const us = usToggle.checked;
   const vg = vgToggle.checked;
-  if (us && vg) return 'usVg';
-  if (us)       return 'us';
-  if (vg)       return 'vg';
-  return null;
+  let base = 'f:' + (us ? '1' : '0') + ':' + (vg ? '1' : '0');
+  // Include selection so aggregate vs single-match results don't collide
+  return selectedMatchIndex != null ? base + ':m' + selectedMatchIndex : base;
 }
 
 function filterLabel() {
@@ -156,34 +220,14 @@ function copiesSuffix() {
   return parts.length ? parts.join(' ') : 'for sale';
 }
 
-function renderUnfiltered() {
-  if (!cachedData) return;
-  const g = cachedData.global;
-  const matches = g.matches || [];
-  const primary = matches.length > 0 ? matches[0] : g;
-  const divider = document.getElementById('stats-divider');
-
-  divider.innerHTML = 'All Vinyl — <span class="badge">All Conditions Worldwide</span>';
-  rLink.href = primary.sellUrl || g.sellUrl;
-  rLink.textContent = 'View all copies on Discogs ↗';
-  renderStats(globalStats, g);
-
-  const matchListEl = document.getElementById('match-list');
-  if (matchListEl) renderMatchList(matchListEl, matches);
-}
-
 function applyFilters() {
   if (!cachedData) return;
   const us = usToggle.checked;
   const vg = vgToggle.checked;
 
-  // No filters — show original API data
-  if (!us && !vg) { renderUnfiltered(); return; }
-
   const key = filterCacheKey();
   const g = cachedData.global;
   const matches = g.matches || [];
-  const primary = matches.length > 0 ? matches[0] : g;
   const divider = document.getElementById('stats-divider');
 
   // If we already have cached data for this filter combo, show it
@@ -194,11 +238,15 @@ function applyFilters() {
 
   // Show loading state
   divider.innerHTML = filterLabel();
-  rLink.href = buildFilteredUrl(primary.sellUrl || g.sellUrl, us, vg);
-  rLink.textContent = filterLinkText();
+  updateHeaderForSelection();
   globalStats.innerHTML = '<div class="stat-card" style="grid-column:1/-1;text-align:center;color:#9e9e9e;font-size:12px;"><div class="spinner" style="display:inline-block;margin-right:8px;vertical-align:middle;"></div>Loading filtered results…</div>';
 
-  const matchData = matches.map(m => ({ sellUrl: m.sellUrl }));
+  // When a specific release is selected, only scrape that one
+  const queryMatches = selectedMatchIndex != null && selectedMatchIndex < matches.length
+    ? [matches[selectedMatchIndex]]
+    : matches;
+
+  const matchData = queryMatches.map(m => ({ sellUrl: m.sellUrl }));
 
   chrome.runtime.sendMessage(
     { type: 'discogs-filtered-stats', matches: matchData, usOnly: us, vgPlus: vg },
@@ -218,60 +266,77 @@ function applyFilters() {
 
 function showFilteredData(fData, matches) {
   const divider = document.getElementById('stats-divider');
-  const primary = matches.length > 0 ? matches[0] : cachedData.global;
   const us = usToggle.checked;
   const vg = vgToggle.checked;
 
   divider.innerHTML = filterLabel();
-  rLink.href = buildFilteredUrl(primary.sellUrl || cachedData.global.sellUrl, us, vg);
-  rLink.textContent = filterLinkText();
+  updateHeaderForSelection();
 
   // Use filter-specific prices when available, fall back to API prices
   const g = cachedData.global;
+
+  // When a specific release is selected, fData has one matchStats entry
+  // that corresponds to that single release, not the full array.
+  const isSingleSelected = selectedMatchIndex != null;
+
   const fLowest = fData.lowestPrice != null ? fData.lowestPrice : null;
   const fMedian = fData.medianPrice != null ? fData.medianPrice : null;
-  // Cap filtered count at global count — filtered is a subset, can never exceed total
-  const cappedTotal = Math.min(fData.numForSale, g.numForSale || Infinity);
 
-  // Decide whether to use scraped prices or fall back to global API prices.
-  // When VG+ filter is on, we MUST use scraped prices — the global API
-  // lowest/median includes all conditions (VG, G, F, P) which would be wrong.
-  // When only US filter is on (no VG+), we can fall back to global prices
-  // if the filter didn't narrow the count (all copies already ship from US).
-  const useScrapedPrices = vg || cappedTotal < (g.numForSale || 0);
-  const displayLowest = cappedTotal > 0
-    ? (useScrapedPrices ? (fLowest != null ? fLowest : g.lowestPrice) : g.lowestPrice)
+  // Scraped data is the single source of truth for counts.
+  // fData.numForSale = filtered matched count (or all if no filter)
+  // fData.scrapedTotal = total listings on the page (unfiltered)
+  const displayTotal = fData.numForSale;
+  const isFiltered = vg || us;
+  const useScrapedPrices = isFiltered || displayTotal > 0;
+  const fallbackLowest = isSingleSelected ? matches[selectedMatchIndex]?.lowestPrice : g.lowestPrice;
+  const fallbackMedian = isSingleSelected ? matches[selectedMatchIndex]?.medianPrice : g.medianPrice;
+  const displayLowest = displayTotal > 0
+    ? (fLowest != null ? fLowest : fallbackLowest)
     : null;
-  const displayMedian = cappedTotal > 0
-    ? (useScrapedPrices ? (fMedian != null ? fMedian : g.medianPrice) : g.medianPrice)
+  const displayMedian = displayTotal > 0
+    ? (fMedian != null ? fMedian : fallbackMedian)
     : null;
 
   renderStats(globalStats, {
-    numForSale: cappedTotal,
+    numForSale: displayTotal,
     lowestPrice: displayLowest,
     medianPrice: displayMedian,
-    vgPlusPrice: cappedTotal > 0 ? g.vgPlusPrice : null,
-    lowestGrade: useScrapedPrices ? null : g.lowestGrade
+    vgPlusPrice: displayTotal > 0 ? (isSingleSelected ? matches[selectedMatchIndex]?.vgPlusPrice : g.vgPlusPrice) : null,
+    lowestGrade: isFiltered ? null : (isSingleSelected ? matches[selectedMatchIndex]?.lowestGrade : g.lowestGrade)
   });
 
   const suffix = copiesSuffix();
   const matchListEl = document.getElementById('match-list');
-  if (matchListEl && matches.length > 1 && fData.matchStats) {
+  if (matchListEl && matches.length > 1) {
+    // When a specific release is selected, we only have 1 matchStats entry
+    // but we still render all matches so user can switch selection.
     let html = '<div class="section-divider">Releases containing this track</div>';
     html += '<div class="match-list">';
     for (let i = 0; i < matches.length; i++) {
       const m = matches[i];
-      const msRaw = fData.matchStats[i] || { numForSale: 0, lowestPrice: null, medianPrice: null };
-      // Cap per-match filtered count at global count for this match
-      const ms = { numForSale: Math.min(msRaw.numForSale, m.numForSale || Infinity), lowestPrice: msRaw.lowestPrice };
-      // When VG+ is on, always use scraped price (global includes all conditions).
-      // When only US filter, fall back to global match price if count unchanged.
-      const useMatchScraped = vg || ms.numForSale < (m.numForSale || 0);
-      const msPrice = useMatchScraped
-        ? (ms.lowestPrice != null ? ms.lowestPrice : m.lowestPrice)
-        : m.lowestPrice;
+      const isSelected = selectedMatchIndex === i;
+
+      // Determine per-match stats: if aggregate (no selection), use matchStats array;
+      // if this is the selected match, use fData.matchStats[0] (the single entry).
+      // Scraped data is the source of truth — no capping against stale API values.
+      let msPrice = m.lowestPrice;
+      let msCount = m.numForSale || 0;
+      let msSuffix = 'for sale';
+
+      if (!isSingleSelected && fData.matchStats && fData.matchStats[i]) {
+        const msRaw = fData.matchStats[i];
+        msPrice = msRaw.lowestPrice != null ? msRaw.lowestPrice : m.lowestPrice;
+        msCount = msRaw.numForSale;
+        msSuffix = suffix;
+      } else if (isSingleSelected && isSelected && fData.matchStats && fData.matchStats[0]) {
+        const msRaw = fData.matchStats[0];
+        msPrice = msRaw.lowestPrice != null ? msRaw.lowestPrice : m.lowestPrice;
+        msCount = msRaw.numForSale;
+        msSuffix = suffix;
+      }
+
       const isCheapest = i === 0;
-      html += `<a class="match-item${isCheapest ? ' cheapest' : ''}" href="${escHtml(buildFilteredUrl(m.sellUrl, us, vg))}" target="_blank" rel="noopener noreferrer">`;
+      html += `<div class="match-item${isSelected ? ' selected' : ''}" data-match-idx="${i}">`;
       if (m.thumb) {
         html += `<img class="match-thumb" src="${escHtml(m.thumb)}" alt="">`;
       } else {
@@ -279,22 +344,23 @@ function showFilteredData(fData, matches) {
       }
       html += `<div class="match-info">`;
       html += `<div class="match-title">${escHtml(m.title)}</div>`;
-      html += `<div class="match-artist">${escHtml(m.artists)}${m.year ? ' (' + m.year + ')' : ''}</div>`;
+      html += `<div class="match-artist">${escHtml(m.artists)}${m.year ? ' (' + m.year + ')' : ''}${m.format ? ' · ' + escHtml(m.format) : ''}</div>`;
       html += `</div>`;
       html += `<div class="match-price-col">`;
-      if (ms.numForSale > 0) {
+      if (msCount > 0) {
         html += `<div class="match-price">${fmtPrice(msPrice)}</div>`;
-        html += `<div class="match-copies">${ms.numForSale} ${suffix}</div>`;
+        html += `<div class="match-copies">${msCount} ${msSuffix}</div>`;
       } else {
         html += `<div class="match-price dim">—</div>`;
-        html += `<div class="match-copies">none ${suffix}</div>`;
+        html += `<div class="match-copies">none ${msSuffix}</div>`;
       }
       html += `</div>`;
       if (isCheapest) html += `<div class="cheapest-badge">Best Price</div>`;
-      html += `</a>`;
+      html += `</div>`;
     }
     html += '</div>';
     matchListEl.innerHTML = html;
+    bindMatchClicks(matchListEl);
   } else if (matchListEl && matches.length <= 1) {
     matchListEl.innerHTML = '';
   }
@@ -303,6 +369,7 @@ function showFilteredData(fData, matches) {
 function showResults(data) {
   hideAll();
   show(mainEl);
+  selectedMatchIndex = null;  // reset selection on new search
 
   const g = data.global;
   const matches = g.matches || [];

@@ -256,9 +256,68 @@ function isVinylFormat(formats) {
   return false;
 }
 
+/* ── Expand master into per-version matches ──────────────────── */
+
+async function expandMasterVersions(master, masterId, seenReleases) {
+  var results = [];
+  var artists = extractArtistNames(master.artists);
+
+  try {
+    var vp = { per_page: "100", sort: "released", sort_order: "desc", format: "Vinyl" };
+    var versionsData = await discogsGet("/masters/" + masterId + "/versions", vp);
+    var vList = (versionsData && versionsData.versions) ? versionsData.versions : [];
+    // Cap to avoid excessive API calls later in gatherPricing
+    var vCap = Math.min(vList.length, 10);
+
+    for (var i = 0; i < vCap; i++) {
+      var v = vList[i];
+      // Only vinyl
+      if (!v.major_formats || v.major_formats.indexOf("Vinyl") < 0) continue;
+      // Skip duplicates
+      if (seenReleases[v.id]) continue;
+      seenReleases[v.id] = true;
+
+      // buildResult → gatherPricing scrapes the sell page for each match,
+      // so versions with 0 copies will just show "none listed" and get
+      // filtered out in buildResult.
+      results.push({
+        masterId: masterId,
+        releaseId: v.id,
+        title: v.title || master.title,
+        format: v.format || null,
+        artists: artists,
+        year: v.released || master.year,
+        thumb: v.thumb || ((master.images && master.images[0]) ? master.images[0].uri150 : null),
+        numForSale: 0,
+        lowestPrice: null
+      });
+    }
+  } catch (e) {
+    console.error("[DP] expandMasterVersions error:", e);
+  }
+
+  // Fallback: if no vinyl versions found at all, create a single master-level match
+  if (results.length === 0) {
+    results.push({
+      masterId: masterId,
+      releaseId: null,
+      title: master.title,
+      format: null,
+      artists: artists,
+      year: master.year,
+      thumb: (master.images && master.images[0]) ? master.images[0].uri150 : null,
+      numForSale: master.num_for_sale || 0,
+      lowestPrice: master.lowest_price != null ? master.lowest_price : null
+    });
+  }
+
+  return results;
+}
+
 async function fetchDiscogsDetails(googleResults, trackName) {
   var matches = [];
   var seenMasters = {};
+  var seenReleases = {};
 
   // Process up to 5 Google results
   var cap = Math.min(googleResults.length, 5);
@@ -278,22 +337,15 @@ async function fetchDiscogsDetails(googleResults, trackName) {
       console.log("[DP] master", gr.id, master.title, "→ track:", trackOk);
       if (!trackOk) continue;
 
-      matches.push({
-        masterId: gr.id,
-        releaseId: null,
-        title: master.title,
-        artists: extractArtistNames(master.artists),
-        year: master.year,
-        thumb: (master.images && master.images[0]) ? master.images[0].uri150 : null,
-        numForSale: master.num_for_sale || 0,
-        lowestPrice: master.lowest_price != null ? master.lowest_price : null
-      });
+      // Expand into per-version matches so each pressing appears separately
+      var versionMatches = await expandMasterVersions(master, gr.id, seenReleases);
+      for (var vm = 0; vm < versionMatches.length; vm++) matches.push(versionMatches[vm]);
 
     } else if (gr.type === "release") {
       var rel = await discogsGet("/releases/" + gr.id);
       if (!rel) continue;
 
-      // If it has a master, use the master (better for pricing)
+      // If it has a master, expand the master into per-version matches
       if (rel.master_id && !seenMasters[rel.master_id]) {
         seenMasters[rel.master_id] = true;
         var mst = await discogsGet("/masters/" + rel.master_id);
@@ -301,16 +353,8 @@ async function fetchDiscogsDetails(googleResults, trackName) {
           var mTrackOk = !trackName || tracklistContains(mst.tracklist, trackName);
           console.log("[DP] release", gr.id, "→ master", rel.master_id, mst.title, "→ track:", mTrackOk);
           if (mTrackOk) {
-            matches.push({
-              masterId: rel.master_id,
-              releaseId: gr.id,
-              title: mst.title,
-              artists: extractArtistNames(mst.artists),
-              year: mst.year,
-              thumb: (mst.images && mst.images[0]) ? mst.images[0].uri150 : null,
-              numForSale: mst.num_for_sale || 0,
-              lowestPrice: mst.lowest_price != null ? mst.lowest_price : null
-            });
+            var mVersionMatches = await expandMasterVersions(mst, rel.master_id, seenReleases);
+            for (var mv = 0; mv < mVersionMatches.length; mv++) matches.push(mVersionMatches[mv]);
             continue;
           }
         }
@@ -348,17 +392,6 @@ async function fetchDiscogsDetails(googleResults, trackName) {
 
 /* ── Vinyl pricing ───────────────────────────────────────────── */
 
-async function getMarketplaceStats(releaseId) {
-  try {
-    var stats = await discogsGet("/marketplace/stats/" + releaseId, { curr_abbr: "USD" });
-    if (!stats) return { numForSale: 0, lowestPrice: null };
-    return {
-      numForSale: stats.num_for_sale || 0,
-      lowestPrice: (stats.lowest_price && stats.lowest_price.value != null) ? stats.lowest_price.value : null
-    };
-  } catch (e) { return { numForSale: 0, lowestPrice: null }; }
-}
-
 async function getPriceSuggestions(releaseId) {
   try {
     return (await discogsGet("/marketplace/price_suggestions/" + releaseId)) || null;
@@ -367,61 +400,39 @@ async function getPriceSuggestions(releaseId) {
 
 async function gatherPricing(match, usOnly) {
   var totalForSale = 0;
-  var allPrices = [];
-  var lowestPrice = Infinity;
+  var lowestPrice = null;
+  var scrapedPrices = [];
   var priceSuggestions = null;
 
-  if (match.masterId) {
-    var vp = { per_page: "100", sort: "released", sort_order: "desc", format: "Vinyl" };
-    if (usOnly) vp.country = "US";
-    var versions = await discogsGet("/masters/" + match.masterId + "/versions", vp);
-    var vList = (versions && versions.versions) ? versions.versions : [];
-    var cap = Math.min(vList.length, 12);
+  // Scrape the sell page for an initial count.  The popup will re-scrape
+  // via handleFilteredStats for both filtered AND unfiltered views, so
+  // this is just a best-effort first pass.
+  var sellUrl;
+  if (match.releaseId)
+    sellUrl = "https://www.discogs.com/sell/release/" + match.releaseId + "?ev=rb&sort=price%2Casc";
+  else if (match.masterId)
+    sellUrl = "https://www.discogs.com/sell/list?master_id=" + match.masterId + "&ev=mb&format=Vinyl&sort=price%2Casc";
 
-    for (var i = 0; i < cap; i++) {
-      var stats = await getMarketplaceStats(vList[i].id);
-      totalForSale += stats.numForSale;
-      if (stats.lowestPrice != null) {
-        allPrices.push(stats.lowestPrice);
-        if (stats.lowestPrice < lowestPrice) lowestPrice = stats.lowestPrice;
+  if (sellUrl) {
+    try {
+      var spRes = await fetch(sellUrl, { headers: { "Accept": "text/html", "Accept-Language": "en-US,en;q=0.9" } });
+      if (spRes.ok) {
+        var spHtml = await spRes.text();
+        var pg = parseFilteredPage(spHtml, false, false);
+        if (pg.total > 0) totalForSale = pg.total;
+        if (pg.prices.length > 0) scrapedPrices = pg.prices;
+        if (pg.lowest != null) lowestPrice = pg.lowest;
       }
-      if (!priceSuggestions && stats.numForSale > 0)
-        priceSuggestions = await getPriceSuggestions(vList[i].id);
-    }
-
-    if (!usOnly && match.numForSale) totalForSale = Math.max(totalForSale, match.numForSale);
-    if (!usOnly && match.lowestPrice != null && match.lowestPrice < lowestPrice)
-      lowestPrice = match.lowestPrice;
-  } else if (match.releaseId) {
-    var st = await getMarketplaceStats(match.releaseId);
-    totalForSale = st.numForSale;
-    if (st.lowestPrice != null) { allPrices.push(st.lowestPrice); lowestPrice = st.lowestPrice; }
-    if (st.numForSale > 0) priceSuggestions = await getPriceSuggestions(match.releaseId);
+    } catch (e) { /* scrape failed — counts stay 0 */ }
   }
 
-  if (lowestPrice === Infinity) lowestPrice = null;
+  // Get price suggestions (VG+, NM estimates) — only API endpoint that
+  // isn't available from the sell page HTML.
+  var releaseForSuggestions = match.releaseId || null;
+  if (releaseForSuggestions && totalForSale > 0)
+    priceSuggestions = await getPriceSuggestions(releaseForSuggestions);
 
-  // Scrape sell page to get all individual listing prices for accurate median
-  var scrapedPrices = [];
-  if (totalForSale > 0) {
-    var sellUrl;
-    if (match.masterId)
-      sellUrl = "https://www.discogs.com/sell/list?master_id=" + match.masterId + "&ev=mb&format=Vinyl&sort=price%2Casc";
-    else if (match.releaseId)
-      sellUrl = "https://www.discogs.com/sell/release/" + match.releaseId + "?ev=rb&sort=price%2Casc";
-    if (sellUrl) {
-      try {
-        var spRes = await fetch(sellUrl, { headers: { "Accept": "text/html", "Accept-Language": "en-US,en;q=0.9" } });
-        if (spRes.ok) {
-          var spHtml = await spRes.text();
-          var pg = parseFilteredPage(spHtml, false, false);
-          if (pg.prices.length > 0) scrapedPrices = pg.prices;
-        }
-      } catch (e) { /* ignore scrape errors, fall back to API prices */ }
-    }
-  }
-
-  var medianSource = scrapedPrices.length > 0 ? scrapedPrices : allPrices;
+  var medianSource = scrapedPrices.length > 0 ? scrapedPrices : [];
   medianSource.sort(function(a, b) { return a - b; });
   var medianPrice = computeMedian(medianSource);
 
@@ -457,10 +468,13 @@ async function gatherPricing(match, usOnly) {
 /* ── Build result ────────────────────────────────────────────── */
 
 function makeSellUrl(m, query) {
-  if (m.masterId)
-    return "https://www.discogs.com/sell/list?master_id=" + m.masterId + "&ev=mb&format=Vinyl";
+  // Prefer releaseId — links to the specific release sell page which matches
+  // the per-release counts we scrape.  Master sell pages aggregate all
+  // versions and show inflated totals.
   if (m.releaseId)
     return "https://www.discogs.com/sell/release/" + m.releaseId + "?ev=rb";
+  if (m.masterId)
+    return "https://www.discogs.com/sell/list?master_id=" + m.masterId + "&ev=mb&format=Vinyl";
   return "https://www.discogs.com/search/?q=" + encodeURIComponent(query) + "&format=Vinyl";
 }
 
@@ -488,7 +502,8 @@ async function buildResult(matches, query, usOnly) {
 
     matchDetails.push({
       masterId: m.masterId, releaseId: m.releaseId,
-      title: m.title, artists: m.artists,
+      title: m.title, format: m.format || null,
+      artists: m.artists,
       year: m.year, thumb: m.thumb,
       sellUrl: makeSellUrl(m, query),
       numForSale: p.totalForSale,
@@ -498,6 +513,9 @@ async function buildResult(matches, query, usOnly) {
       vgPlusPrice: p.vgPlusPrice
     });
   }
+
+  // Drop versions with nothing for sale (expanded from master but no listings)
+  matchDetails = matchDetails.filter(function(d) { return d.numForSale > 0; });
 
   // Sort: cheapest first, nulls at end
   matchDetails.sort(function(a, b) {
@@ -644,19 +662,21 @@ function isVGPlusOrBetter(grade) {
 function parseFilteredPage(html, usOnly, vgPlus) {
   /* ── Total count from pagination header ── */
   var total = 0;
+  var hasPagination = false;
   var countMatch = html.match(/\d+\s*[\u2013\u2014-]\s*\d+\s+of\s+([\d,]+)/);
   if (countMatch) {
     total = parseInt(countMatch[1].replace(/,/g, ""), 10) || 0;
+    hasPagination = true;
   } else {
     var noResults = html.match(/No\s+items\s+for\s+sale|0\s+results|Sorry,\s+no\s+results/i);
     if (!noResults) {
-      total = (html.match(/Media\s+Condition/gi) || []).length;
+      total = (html.match(/Media[\s-]+Condition\s*:/gi) || []).length;
     }
   }
 
   /* ── Parse each listing ── */
-  var parts = html.split(/Media[\s-]+Condition/i);
-  var listingsOnPage = parts.length - 1;
+  var parts = html.split(/Media[\s-]+Condition\s*:/i);
+  var listingsOnPage = 0;
   var matched = 0;
   var prices = [];
   var lowest = null;
@@ -664,10 +684,26 @@ function parseFilteredPage(html, usOnly, vgPlus) {
   for (var li = 1; li < parts.length; li++) {
     var block = parts[li];
 
+    // Skip blocks without a price (safety net for non-listing fragments)
+    if (!/\$[\d,.]/.test(block)) continue;
+
+    // Every real listing has a parseable media condition grade right after
+    // the "Media Condition:" split point.  Blocks that lack one are phantom
+    // fragments (sidebar filters, schema markup, etc.) — skip them.
+    var condMatch = block.match(/[\s]*(?:<[^>]*>\s*)*(Mint \(M\)|Near Mint \(NM or M-\)|Very Good Plus \(VG\+\)|Very Good \(VG\)|Good Plus \(G\+\)|Good \(G\)|Fair \(F\)|Poor \(P\))/);
+    if (!condMatch) continue;
+
+    // Every real listing shows "Ships From:" (mandatory seller location).
+    // Sidebar filter blocks never contain this — they only have grade
+    // labels and counts.  This reliably distinguishes real listings from
+    // phantom sidebar fragments.
+    if (!/Ships\s+From\s*:/i.test(block)) continue;
+
+    listingsOnPage++;
+
     // ── Check VG+ filter ──
     if (vgPlus) {
-      var condMatch = block.match(/[:\s]*(?:<[^>]*>\s*)*(Mint \(M\)|Near Mint \(NM or M-\)|Very Good Plus \(VG\+\)|Very Good \(VG\)|Good Plus \(G\+\)|Good \(G\)|Fair \(F\)|Poor \(P\))/i);
-      if (!condMatch || !isVGPlusOrBetter(condMatch[1])) continue;
+      if (!isVGPlusOrBetter(condMatch[1])) continue;
     }
 
     // ── Check US filter ──
@@ -696,6 +732,23 @@ function parseFilteredPage(html, usOnly, vgPlus) {
       }
     }
   }
+
+  // When no pagination header was found, use listingsOnPage as the total.
+  // When pagination IS available, trust it — it's authoritative.
+  // listingsOnPage can be inflated by stray "Media Condition:" fragments
+  // elsewhere in the page HTML (hidden sections, schema markup, etc.).
+  if (!hasPagination && listingsOnPage > 0) {
+    total = listingsOnPage;
+  }
+
+  // Cap to pagination total — phantom blocks can inflate listingsOnPage
+  // and matched beyond the real listing count.
+  if (hasPagination && total > 0) {
+    if (listingsOnPage > total) listingsOnPage = total;
+    if (matched > total) matched = total;
+  }
+
+  console.log("[DP] parseFilteredPage → total:", total, "listingsOnPage:", listingsOnPage, "matched:", matched, "prices:", prices, "vgPlus:", vgPlus, "usOnly:", usOnly);
 
   return { total: total, listingsOnPage: listingsOnPage, matched: matched, prices: prices, lowest: lowest };
 }
@@ -752,10 +805,10 @@ async function scrapeFilteredListings(sellUrl, usOnly, vgPlus) {
     }
 
     console.log("[DP] filtered scrape:", allMatched, "/", totalOnPages, "on", page - 1, "page(s) →", matchedCount, "of", totalListings, "total, lowest:", lowestPrice, "median:", medianPrice);
-    return { numForSale: matchedCount, lowestPrice: lowestPrice, medianPrice: medianPrice };
+    return { numForSale: matchedCount, scrapedTotal: totalListings, lowestPrice: lowestPrice, medianPrice: medianPrice };
   } catch (e) {
     console.error("[DP] filtered scrape error:", e);
-    return { numForSale: 0, lowestPrice: null, medianPrice: null };
+    return { numForSale: 0, scrapedTotal: 0, lowestPrice: null, medianPrice: null };
   }
 }
 
@@ -770,6 +823,7 @@ function buildFilteredUrl(baseUrl, usOnly) {
 
 async function handleFilteredStats(matches, usOnly, vgPlus) {
   var totalForSale = 0;
+  var scrapedTotal = 0;
   var allLowest = Infinity;
   var allMedians = [];
   var matchStats = [];
@@ -788,9 +842,10 @@ async function handleFilteredStats(matches, usOnly, vgPlus) {
     var stats = await scrapeFilteredListings(sortedUrl, usOnly, vgPlus);
 
     totalForSale += stats.numForSale;
+    scrapedTotal += stats.scrapedTotal;
     if (stats.lowestPrice != null && stats.lowestPrice < allLowest) allLowest = stats.lowestPrice;
     if (stats.medianPrice != null) allMedians.push(stats.medianPrice);
-    matchStats.push({ numForSale: stats.numForSale, lowestPrice: stats.lowestPrice, medianPrice: stats.medianPrice });
+    matchStats.push({ numForSale: stats.numForSale, scrapedTotal: stats.scrapedTotal, lowestPrice: stats.lowestPrice, medianPrice: stats.medianPrice });
   }
 
   if (allLowest === Infinity) allLowest = null;
@@ -799,6 +854,7 @@ async function handleFilteredStats(matches, usOnly, vgPlus) {
 
   return {
     numForSale: totalForSale,
+    scrapedTotal: scrapedTotal,
     lowestPrice: allLowest,
     medianPrice: overallMedian,
     matchStats: matchStats
