@@ -442,6 +442,8 @@ async function init() {
 
   /* 4 — search */
   cachedQuery = query;
+  hideAll();
+  show(loadingEl);
 
   // Check for cached data first — show instantly if available
   chrome.runtime.sendMessage(
@@ -452,12 +454,7 @@ async function init() {
         showResults(cacheRes.data);
       }
 
-      // Always fetch fresh data (even if we showed cached)
-      if (!cacheRes?.data) {
-        hideAll();
-        show(loadingEl);
-      }
-
+      // Always fetch fresh data
       chrome.runtime.sendMessage(
         { type: 'discogs-full-search', query },
         (res) => {
