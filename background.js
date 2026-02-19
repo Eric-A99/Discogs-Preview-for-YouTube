@@ -9,6 +9,7 @@
 
 var DISCOGS_BASE = "https://api.discogs.com";
 var UA = "DiscogsPreview/1.0 +https://github.com/discogs-preview";
+var DEBUG = false;
 
 /* ── Rate limiting (Discogs: 60 req/min) ─────────────────────── */
 
@@ -23,7 +24,7 @@ function rateOk(stamps, limit, windowMs) {
 async function waitForDiscogsRate() {
   while (!rateOk(discogsTimestamps, 55, 60000)) {
     var wait = 60000 - (Date.now() - discogsTimestamps[0]) + 200;
-    console.log("[DP] Discogs rate limit — waiting", wait, "ms");
+    if (DEBUG) console.log("[DP] Discogs rate limit — waiting", wait, "ms");
     await new Promise(function(r) { setTimeout(r, wait); });
   }
 }
@@ -130,7 +131,6 @@ async function discogsGet(path, params, _retries) {
   await waitForDiscogsRate();
 
   var url = new URL(DISCOGS_BASE + path);
-  url.searchParams.set("token", token);
   if (params) {
     var keys = Object.keys(params);
     for (var i = 0; i < keys.length; i++) {
@@ -138,16 +138,16 @@ async function discogsGet(path, params, _retries) {
     }
   }
 
-  console.log("[DP] DISCOGS", url.pathname);
+  if (DEBUG) console.log("[DP] DISCOGS", url.pathname);
 
-  var res = await fetch(url.toString(), { headers: { "User-Agent": UA } });
+  var res = await fetch(url.toString(), { headers: { "User-Agent": UA, "Authorization": "Discogs token=" + token } });
   discogsTimestamps.push(Date.now());
 
   if (res.status === 429) {
     var attempt = (_retries || 0) + 1;
     if (attempt > 3) throw new Error("Discogs rate limit exceeded after 3 retries.");
     var ra = parseInt(res.headers.get("Retry-After") || "5", 10);
-    console.log("[DP] 429 retry", attempt, "/3 in", ra, "s");
+    if (DEBUG) console.log("[DP] 429 retry", attempt, "/3 in", ra, "s");
     await new Promise(function(r) { setTimeout(r, ra * 1000); });
     return discogsGet(path, params, attempt);
   }
@@ -165,54 +165,72 @@ async function discogsGet(path, params, _retries) {
  * Returns array of { type: "master"|"release", id: number, url: string }
  */
 async function googleDiscogsSearch(query) {
-  var searchQuery = query + " discogs vinyl";
-  var url = "https://www.google.com/search?q=" + encodeURIComponent(searchQuery) + "&num=10";
+  try {
+    var searchQuery = query + " discogs vinyl";
+    var url = "https://www.google.com/search?q=" + encodeURIComponent(searchQuery) + "&num=10";
 
-  console.log("[DP] Google search:", searchQuery);
+    if (DEBUG) console.log("[DP] Google search:", searchQuery);
 
-  var res = await fetch(url, {
-    headers: {
-      "Accept": "text/html,application/xhtml+xml",
-      "Accept-Language": "en-US,en;q=0.9"
+    var controller = new AbortController();
+    var timeoutId = setTimeout(function() { controller.abort(); }, 8000);
+
+    var res = await fetch(url, {
+      headers: {
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9"
+      },
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      if (DEBUG) console.log("[DP] Google HTTP", res.status);
+      return [];
     }
-  });
 
-  if (!res.ok) {
-    console.log("[DP] Google HTTP", res.status);
-    return [];
+    var html = await res.text();
+    if (DEBUG) console.log("[DP] Google HTML length:", html.length);
+
+    if (html.indexOf("unusual traffic") >= 0 || html.indexOf("captcha") >= 0) {
+      console.log("[DP] Google CAPTCHA detected");
+      return [];
+    }
+
+    // Extract Discogs URLs from Google results
+    // Google wraps links in /url?q=... redirects or as direct <a href="..."> links
+    var results = [];
+    var seen = {};
+
+    // Pattern 1: /url?q=https://www.discogs.com/...
+    var redirectPattern = /\/url\?q=(https?:\/\/www\.discogs\.com\/[^&"]+)/g;
+    var m;
+    while ((m = redirectPattern.exec(html)) !== null) {
+      var decoded = decodeURIComponent(m[1]);
+      parseDiscogsUrl(decoded, results, seen);
+    }
+
+    // Pattern 2: direct href="https://www.discogs.com/..."
+    var directPattern = /href="(https?:\/\/www\.discogs\.com\/[^"]+)"/g;
+    while ((m = directPattern.exec(html)) !== null) {
+      parseDiscogsUrl(m[1], results, seen);
+    }
+
+    // Pattern 3: URLs in text (sometimes in snippets)
+    var textPattern = /https?:\/\/www\.discogs\.com\/(?:release|master)\/(\d+)/g;
+    while ((m = textPattern.exec(html)) !== null) {
+      var fullUrl = m[0];
+      parseDiscogsUrl(fullUrl, results, seen);
+    }
+
+    if (DEBUG) console.log("[DP] Google found", results.length, "Discogs URLs");
+    return results;
+  } catch (e) {
+    if (e.name === "AbortError") {
+      if (DEBUG) console.log("[DP] Google search timed out");
+      return [];
+    }
+    throw e;
   }
-
-  var html = await res.text();
-  console.log("[DP] Google HTML length:", html.length);
-
-  // Extract Discogs URLs from Google results
-  // Google wraps links in /url?q=... redirects or as direct <a href="..."> links
-  var results = [];
-  var seen = {};
-
-  // Pattern 1: /url?q=https://www.discogs.com/...
-  var redirectPattern = /\/url\?q=(https?:\/\/www\.discogs\.com\/[^&"]+)/g;
-  var m;
-  while ((m = redirectPattern.exec(html)) !== null) {
-    var decoded = decodeURIComponent(m[1]);
-    parseDiscogsUrl(decoded, results, seen);
-  }
-
-  // Pattern 2: direct href="https://www.discogs.com/..."
-  var directPattern = /href="(https?:\/\/www\.discogs\.com\/[^"]+)"/g;
-  while ((m = directPattern.exec(html)) !== null) {
-    parseDiscogsUrl(m[1], results, seen);
-  }
-
-  // Pattern 3: URLs in text (sometimes in snippets)
-  var textPattern = /https?:\/\/www\.discogs\.com\/(?:release|master)\/(\d+)/g;
-  while ((m = textPattern.exec(html)) !== null) {
-    var fullUrl = m[0];
-    parseDiscogsUrl(fullUrl, results, seen);
-  }
-
-  console.log("[DP] Google found", results.length, "Discogs URLs");
-  return results;
 }
 
 function parseDiscogsUrl(url, results, seen) {
@@ -334,7 +352,7 @@ async function fetchDiscogsDetails(googleResults, trackName) {
 
       // Verify track is on this release (skip if empty — fallback mode)
       var trackOk = !trackName || tracklistContains(master.tracklist, trackName);
-      console.log("[DP] master", gr.id, master.title, "→ track:", trackOk);
+      if (DEBUG) console.log("[DP] master", gr.id, master.title, "→ track:", trackOk);
       if (!trackOk) continue;
 
       // Expand into per-version matches so each pressing appears separately
@@ -351,7 +369,7 @@ async function fetchDiscogsDetails(googleResults, trackName) {
         var mst = await discogsGet("/masters/" + rel.master_id);
         if (mst) {
           var mTrackOk = !trackName || tracklistContains(mst.tracklist, trackName);
-          console.log("[DP] release", gr.id, "→ master", rel.master_id, mst.title, "→ track:", mTrackOk);
+          if (DEBUG) console.log("[DP] release", gr.id, "→ master", rel.master_id, mst.title, "→ track:", mTrackOk);
           if (mTrackOk) {
             var mVersionMatches = await expandMasterVersions(mst, rel.master_id, seenReleases);
             for (var mv = 0; mv < mVersionMatches.length; mv++) matches.push(mVersionMatches[mv]);
@@ -365,13 +383,13 @@ async function fetchDiscogsDetails(googleResults, trackName) {
 
       // Skip non-vinyl releases (CD, cassette, digital, etc.)
       if (!isVinylFormat(rel.formats)) {
-        console.log("[DP] release", gr.id, rel.title, "→ skipped (not vinyl)");
+        if (DEBUG) console.log("[DP] release", gr.id, rel.title, "→ skipped (not vinyl)");
         continue;
       }
 
       // Check release tracklist directly (skip if empty — fallback mode)
       var rTrackOk = !trackName || tracklistContains(rel.tracklist, trackName);
-      console.log("[DP] release", gr.id, rel.title, "→ track:", rTrackOk);
+      if (DEBUG) console.log("[DP] release", gr.id, rel.title, "→ track:", rTrackOk);
       if (!rTrackOk) continue;
 
       matches.push({
@@ -546,27 +564,27 @@ async function buildResult(matches, query, usOnly) {
 /* ── Main search pipeline ────────────────────────────────────── */
 
 async function findMatchingReleases(query) {
-  console.log("[DP] searching:", query);
+  if (DEBUG) console.log("[DP] searching:", query);
 
   var parsed = parseArtistTrack(query);
   var trackName = parsed.track || query;
-  console.log("[DP] parsed → artist:", JSON.stringify(parsed.artist), "track:", JSON.stringify(trackName));
+  if (DEBUG) console.log("[DP] parsed → artist:", JSON.stringify(parsed.artist), "track:", JSON.stringify(trackName));
 
   // Step 1: Google search for Discogs URLs
   var googleResults = await googleDiscogsSearch(query);
 
   if (googleResults.length === 0) {
-    console.log("[DP] No Discogs URLs found on Google");
+    if (DEBUG) console.log("[DP] No Discogs URLs found on Google");
     return [];
   }
 
   // Step 2: Fetch details + verify track is on each release
   var matches = await fetchDiscogsDetails(googleResults, trackName);
-  console.log("[DP] Verified matches:", matches.length);
+  if (DEBUG) console.log("[DP] Verified matches:", matches.length);
 
   // If nothing verified, retry without track filter (first Google result is usually right)
   if (matches.length === 0 && googleResults.length > 0) {
-    console.log("[DP] No track matches — accepting first Google result as-is");
+    if (DEBUG) console.log("[DP] No track matches — accepting first Google result as-is");
     matches = await fetchDiscogsDetails(googleResults.slice(0, 1), "");
   }
 
@@ -578,6 +596,29 @@ async function findMatchingReleases(query) {
 var searchCache = {};
 var CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 var CACHE_MAX = 50;
+
+function persistCache() {
+  try {
+    chrome.storage.local.set({ discogsCache: JSON.stringify(searchCache) });
+  } catch (e) { /* ignore */ }
+}
+
+async function restoreCache() {
+  try {
+    var d = await chrome.storage.local.get('discogsCache');
+    if (d.discogsCache) {
+      var parsed = JSON.parse(d.discogsCache);
+      var now = Date.now();
+      var keys = Object.keys(parsed);
+      for (var i = 0; i < keys.length; i++) {
+        if (now - parsed[keys[i]].time < CACHE_TTL) {
+          searchCache[keys[i]] = parsed[keys[i]];
+        }
+      }
+    }
+  } catch (e) { /* ignore */ }
+}
+restoreCache();
 
 function pruneCache() {
   var keys = Object.keys(searchCache);
@@ -605,7 +646,7 @@ function pruneCache() {
 async function handleFullSearch(query) {
   var cached = searchCache[query];
   if (cached && (Date.now() - cached.time) < CACHE_TTL) {
-    console.log("[DP] cache hit for:", query);
+    if (DEBUG) console.log("[DP] cache hit for:", query);
     return cached.data;
   }
 
@@ -617,6 +658,7 @@ async function handleFullSearch(query) {
 
   pruneCache();
   searchCache[query] = { data: result, time: Date.now() };
+  persistCache();
   return result;
 }
 
@@ -748,7 +790,7 @@ function parseFilteredPage(html, usOnly, vgPlus) {
     if (matched > total) matched = total;
   }
 
-  console.log("[DP] parseFilteredPage → total:", total, "listingsOnPage:", listingsOnPage, "matched:", matched, "prices:", prices, "vgPlus:", vgPlus, "usOnly:", usOnly);
+  if (DEBUG) console.log("[DP] parseFilteredPage → total:", total, "listingsOnPage:", listingsOnPage, "matched:", matched, "prices:", prices, "vgPlus:", vgPlus, "usOnly:", usOnly);
 
   return { total: total, listingsOnPage: listingsOnPage, matched: matched, prices: prices, lowest: lowest };
 }
@@ -757,7 +799,7 @@ var MAX_SCRAPE_PAGES = 2;
 
 async function scrapeFilteredListings(sellUrl, usOnly, vgPlus) {
   try {
-    console.log("[DP] filtered scrape:", sellUrl, "usOnly:", usOnly, "vgPlus:", vgPlus);
+    if (DEBUG) console.log("[DP] filtered scrape:", sellUrl, "usOnly:", usOnly, "vgPlus:", vgPlus);
 
     var allPrices = [];
     var allMatched = 0;
@@ -804,7 +846,7 @@ async function scrapeFilteredListings(sellUrl, usOnly, vgPlus) {
       matchedCount = Math.round((allMatched / totalOnPages) * totalListings);
     }
 
-    console.log("[DP] filtered scrape:", allMatched, "/", totalOnPages, "on", page - 1, "page(s) →", matchedCount, "of", totalListings, "total, lowest:", lowestPrice, "median:", medianPrice);
+    if (DEBUG) console.log("[DP] filtered scrape:", allMatched, "/", totalOnPages, "on", page - 1, "page(s) →", matchedCount, "of", totalListings, "total, lowest:", lowestPrice, "median:", medianPrice);
     return { numForSale: matchedCount, scrapedTotal: totalListings, lowestPrice: lowestPrice, medianPrice: medianPrice };
   } catch (e) {
     console.error("[DP] filtered scrape error:", e);
@@ -864,7 +906,7 @@ async function handleFilteredStats(matches, usOnly, vgPlus) {
 /* ── Message listener ────────────────────────────────────────── */
 
 chrome.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
-  console.log("[DP] message:", msg.type);
+  if (DEBUG) console.log("[DP] message:", msg.type);
 
   if (msg.type === "discogs-full-search") {
     handleFullSearch(msg.query)
@@ -873,6 +915,16 @@ chrome.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
         console.error("[DP] error:", err);
         sendResponse({ error: err.message });
       });
+    return true;
+  }
+
+  if (msg.type === "discogs-cache-check") {
+    var cached = searchCache[msg.query];
+    if (cached) {
+      sendResponse({ data: cached.data, stale: (Date.now() - cached.time) > CACHE_TTL });
+    } else {
+      sendResponse({ data: null });
+    }
     return true;
   }
 
@@ -888,4 +940,4 @@ chrome.runtime.onMessage.addListener(function(msg, sender, sendResponse) {
   }
 });
 
-console.log("[DP] service worker loaded OK");
+if (DEBUG) console.log("[DP] service worker loaded OK");

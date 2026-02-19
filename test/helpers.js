@@ -67,7 +67,7 @@ function extractVar(src, name) {
 
 /* ── Build sandbox source from real files ────────────────────── */
 
-var code = '';
+var code = 'var DEBUG = false;\n\n';
 
 // background.js — pure functions (no Chrome APIs, no fetch)
 var bgFuncs = [

@@ -2,6 +2,8 @@
  *  Detects YouTube tab, fetches Discogs data, renders pricing.
  */
 
+var DEBUG = false;
+
 /* -- elements -- */
 const setupEl      = document.getElementById('setup');
 const tokenInput   = document.getElementById('token');
@@ -430,8 +432,8 @@ async function init() {
   /* 3 — extract & clean title */
   const rawTitle = tab.title || '';
   const query = cleanTitle(rawTitle);
-  console.log('[POPUP] raw tab.title:', JSON.stringify(rawTitle));
-  console.log('[POPUP] cleaned query:', JSON.stringify(query));
+  if (DEBUG) console.log('[POPUP] raw tab.title:', JSON.stringify(rawTitle));
+  if (DEBUG) console.log('[POPUP] cleaned query:', JSON.stringify(query));
   if (!query) {
     hideAll();
     show(notYtEl);
@@ -440,27 +442,46 @@ async function init() {
 
   /* 4 — search */
   cachedQuery = query;
-  hideAll();
-  show(loadingEl);
 
+  // Check for cached data first — show instantly if available
   chrome.runtime.sendMessage(
-    { type: 'discogs-full-search', query },
-    (res) => {
-      if (chrome.runtime.lastError) {
+    { type: 'discogs-cache-check', query },
+    (cacheRes) => {
+      if (chrome.runtime.lastError) { /* ignore */ }
+      if (cacheRes?.data) {
+        showResults(cacheRes.data);
+      }
+
+      // Always fetch fresh data (even if we showed cached)
+      if (!cacheRes?.data) {
         hideAll();
-        show(errorEl);
-        errorEl.textContent = '⚠ Extension error — try reloading.';
-        return;
+        show(loadingEl);
       }
-      if (res?.error) {
-        hideAll();
-        show(errorEl);
-        errorEl.textContent = '⚠ ' + res.error;
-        return;
-      }
-      if (res?.data) {
-        showResults(res.data);
-      }
+
+      chrome.runtime.sendMessage(
+        { type: 'discogs-full-search', query },
+        (res) => {
+          if (chrome.runtime.lastError) {
+            if (!cacheRes?.data) {
+              hideAll();
+              show(errorEl);
+              errorEl.textContent = '⚠ Extension error — try reloading.';
+            }
+            return;
+          }
+          if (res?.error) {
+            if (!cacheRes?.data) {
+              hideAll();
+              show(errorEl);
+              errorEl.textContent = '⚠ ' + res.error;
+            }
+            return;
+          }
+          if (res?.data) {
+            showResults(res.data);
+          }
+        }
+      );
     }
   );
 }

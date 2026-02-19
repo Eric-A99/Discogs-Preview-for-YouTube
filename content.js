@@ -75,6 +75,7 @@ function ensurePanel() {
   const toggle = panelEl.querySelector('#dcgp-us-toggle');
   if (isExtensionAlive()) {
     chrome.storage.sync.get('usOnly', (d) => {
+      if (chrome.runtime.lastError) return;
       usOnly         = !!d.usOnly;
       toggle.checked = usOnly;
     });
@@ -115,7 +116,7 @@ function showError(msg) {
       chrome.runtime.sendMessage({ type: 'open-options' });
     });
   } else {
-    body.innerHTML = `<div class="dcgp-error">⚠ ${msg}</div>`;
+    body.innerHTML = `<div class="dcgp-error">⚠ ${escHtml(msg)}</div>`;
   }
 }
 
@@ -183,14 +184,14 @@ function runSearch() {
 
   try {
     chrome.runtime.sendMessage(
-      { type: 'discogs-search', query, usOnly },
+      { type: 'discogs-full-search', query },
       (res) => {
         if (chrome.runtime.lastError) {
           showError('Extension error — try reloading the page.');
           return;
         }
         if (res?.error)  return showError(res.error);
-        if (res?.data)   return showResults(res.data);
+        if (res?.data?.global)   return showResults(res.data.global);
         showError('Unexpected response from Discogs.');
       }
     );
