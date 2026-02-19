@@ -11,6 +11,57 @@ var DISCOGS_BASE = "https://api.discogs.com";
 var UA = "DiscogsPreview/1.0 +https://github.com/discogs-preview";
 var DEBUG = false;
 
+/* ── Exchange rates (foreign currency → USD) ─────────────────── */
+
+var FALLBACK_RATES = { EUR: 0.847, GBP: 0.739, JPY: 154.4, CAD: 1.368, AUD: 1.418, BRL: 5.225, MXN: 17.18, SEK: 9.56, DKK: 6.32, CHF: 0.772, NOK: 9.83, PLN: 3.61, CZK: 20.52, NZD: 1.54, ZAR: 16.06 };
+var cachedRates = null;
+var ratesLastFetched = 0;
+var RATES_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
+var SYMBOL_TO_CODE = { "€": "EUR", "£": "GBP", "¥": "JPY", "R$": "BRL", "MX$": "MXN", "kr": "SEK", "zł": "PLN", "Kč": "CZK" };
+
+async function fetchExchangeRates() {
+  var now = Date.now();
+  if (cachedRates && now - ratesLastFetched < RATES_TTL) return cachedRates;
+  try {
+    var stored = await chrome.storage.local.get("exchangeRates");
+    if (stored.exchangeRates) {
+      var parsed = JSON.parse(stored.exchangeRates);
+      if (now - parsed.time < RATES_TTL) {
+        cachedRates = parsed.rates;
+        ratesLastFetched = parsed.time;
+        return cachedRates;
+      }
+    }
+  } catch (e) { /* ignore */ }
+  try {
+    var res = await fetch("https://open.er-api.com/v6/latest/USD", { signal: AbortSignal.timeout(5000) });
+    if (res.ok) {
+      var data = await res.json();
+      if (data.result === "success" && data.rates) {
+        cachedRates = data.rates;
+        ratesLastFetched = now;
+        try { chrome.storage.local.set({ exchangeRates: JSON.stringify({ rates: cachedRates, time: now }) }); } catch (e) { /* ignore */ }
+        if (DEBUG) console.log("[DP] Exchange rates updated");
+        return cachedRates;
+      }
+    }
+  } catch (e) { if (DEBUG) console.log("[DP] Exchange rate fetch failed:", e.message); }
+  if (cachedRates) return cachedRates;
+  return FALLBACK_RATES;
+}
+
+function convertToUSD(amount, currencyCode, rates) {
+  if (!currencyCode || currencyCode === "USD") return amount;
+  var r = rates || cachedRates || FALLBACK_RATES;
+  var rate = r[currencyCode];
+  if (!rate || rate === 0) return null;
+  return Math.round((amount / rate) * 100) / 100;
+}
+
+// Pre-fetch rates on service worker startup
+fetchExchangeRates();
+
 /* ── Rate limiting (Discogs: 60 req/min) ─────────────────────── */
 
 var discogsTimestamps = [];
@@ -421,6 +472,7 @@ async function gatherPricing(match, usOnly) {
   var lowestPrice = null;
   var scrapedPrices = [];
   var priceSuggestions = null;
+  var rates = await fetchExchangeRates();
 
   // Scrape the sell page for an initial count.  The popup will re-scrape
   // via handleFilteredStats for both filtered AND unfiltered views, so
@@ -436,7 +488,7 @@ async function gatherPricing(match, usOnly) {
       var spRes = await fetch(sellUrl, { headers: { "Accept": "text/html", "Accept-Language": "en-US,en;q=0.9" } });
       if (spRes.ok) {
         var spHtml = await spRes.text();
-        var pg = parseFilteredPage(spHtml, false, false);
+        var pg = parseFilteredPage(spHtml, false, false, rates);
         if (pg.total > 0) totalForSale = pg.total;
         if (pg.prices.length > 0) scrapedPrices = pg.prices;
         if (pg.lowest != null) lowestPrice = pg.lowest;
@@ -701,7 +753,7 @@ function isVGPlusOrBetter(grade) {
  * item is on page 1 (unless ALL page-1 items fail the filter, which is
  * uncommon).
  */
-function parseFilteredPage(html, usOnly, vgPlus) {
+function parseFilteredPage(html, usOnly, vgPlus, rates) {
   /* ── Total count from pagination header ── */
   var total = 0;
   var hasPagination = false;
@@ -727,7 +779,7 @@ function parseFilteredPage(html, usOnly, vgPlus) {
     var block = parts[li];
 
     // Skip blocks without a price (safety net for non-listing fragments)
-    if (!/\$[\d,.]/.test(block)) continue;
+    if (!/[\$€£¥][\d,.]/.test(block) && !/(?:CA|A|R|MX)\$[\d,.]/.test(block)) continue;
 
     // Every real listing has a parseable media condition grade right after
     // the "Media Condition:" split point.  Blocks that lack one are phantom
@@ -761,16 +813,50 @@ function parseFilteredPage(html, usOnly, vgPlus) {
     // Extract the item price from this listing block
     var priceRegex = /(\+)?(?:about\s+)?\$([\d,.]+)/g;
     var pm;
+    var foundDirect = false;
     while ((pm = priceRegex.exec(block)) !== null) {
       if (pm[1] === "+") continue;                    // +$6 shipping
       if (pm[0].indexOf("about") >= 0) continue;       // about $60
       var before = block.substring(Math.max(0, pm.index - 20), pm.index);
       if (/shipping\s*$/i.test(before)) continue;      // shipping $25
+      // Skip CA$, A$, R$, MX$ — these are not USD
+      if (/(?:CA|A|R|MX)\s*$/.test(before)) continue;
       var val = parseFloat(pm[2].replace(/,/g, ""));
       if (!isNaN(val) && val > 0) {
         prices.push(val);
         if (lowest == null || val < lowest) lowest = val;
+        foundDirect = true;
         break; // first valid price in this listing block
+      }
+    }
+
+    // Fallback: extract non-USD currency price and convert to USD
+    if (!foundDirect) {
+      var fxRegex = /(\+)?(?:about\s+)?(?:(CA\$|A\$|R\$|MX\$)|([€£¥]))([\d,.]+)/g;
+      var fm;
+      while ((fm = fxRegex.exec(block)) !== null) {
+        if (fm[1] === "+") continue;                    // +€5 shipping
+        if (fm[0].indexOf("about") >= 0) continue;
+        var fBefore = block.substring(Math.max(0, fm.index - 20), fm.index);
+        if (/shipping\s*$/i.test(fBefore)) continue;
+        var symbol = fm[2] || fm[3]; // CA$/A$/R$/MX$ or €/£/¥
+        var code = SYMBOL_TO_CODE[symbol];
+        if (!code) {
+          // Handle prefixed-$ currencies
+          if (symbol === "CA$") code = "CAD";
+          else if (symbol === "A$") code = "AUD";
+          else if (symbol === "R$") code = "BRL";
+          else if (symbol === "MX$") code = "MXN";
+          else continue;
+        }
+        var raw = parseFloat(fm[4].replace(/,/g, ""));
+        if (isNaN(raw) || raw <= 0) continue;
+        var usd = convertToUSD(raw, code, rates);
+        if (usd != null && usd > 0) {
+          prices.push(usd);
+          if (lowest == null || usd < lowest) lowest = usd;
+          break; // first valid foreign price in this block
+        }
       }
     }
   }
@@ -806,6 +892,7 @@ async function scrapeFilteredListings(sellUrl, usOnly, vgPlus) {
     var totalListings = 0;
     var totalOnPages = 0;
     var lowestPrice = null;
+    var rates = await fetchExchangeRates();
 
     for (var page = 1; page <= MAX_SCRAPE_PAGES; page++) {
       var pageUrl = sellUrl;
@@ -820,7 +907,7 @@ async function scrapeFilteredListings(sellUrl, usOnly, vgPlus) {
       if (!res.ok) break;
       var html = await res.text();
 
-      var pg = parseFilteredPage(html, usOnly, vgPlus);
+      var pg = parseFilteredPage(html, usOnly, vgPlus, rates);
 
       if (page === 1) {
         totalListings = pg.total;

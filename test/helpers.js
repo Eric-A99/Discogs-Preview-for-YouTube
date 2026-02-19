@@ -67,20 +67,20 @@ function extractVar(src, name) {
 
 /* ── Build sandbox source from real files ────────────────────── */
 
-var code = 'var DEBUG = false;\n\n';
+var code = 'var DEBUG = false;\nvar cachedRates = null;\n\n';
 
 // background.js — pure functions (no Chrome APIs, no fetch)
 var bgFuncs = [
   'normalize', 'fuzzyNorm', 'wordsContain', 'parseArtistTrack', 'tracklistContains',
   'parseDiscogsUrl', 'extractArtistNames', 'makeSellUrl', 'isVGPlusOrBetter',
-  'isVinylFormat', 'computeMedian', 'parseFilteredPage',
+  'isVinylFormat', 'computeMedian', 'parseFilteredPage', 'convertToUSD',
 ];
 for (var fn of bgFuncs) {
   code += extractFunction(bgSource, fn) + '\n\n';
 }
 
 // background.js — object constants
-for (var vn of ['GRADE_ABBR', 'GRADE_RANK']) {
+for (var vn of ['GRADE_ABBR', 'GRADE_RANK', 'FALLBACK_RATES', 'SYMBOL_TO_CODE']) {
   code += extractVar(bgSource, vn) + '\n\n';
 }
 
@@ -119,7 +119,8 @@ module.exports = {
   normalize, fuzzyNorm, parseArtistTrack, tracklistContains,
   parseDiscogsUrl, extractArtistNames, makeSellUrl,
   GRADE_ABBR, GRADE_RANK, isVGPlusOrBetter, isVinylFormat, computeMedian,
-  parseFilteredPage, parseSellPageHtml,
+  parseFilteredPage, parseSellPageHtml, convertToUSD,
+  FALLBACK_RATES, SYMBOL_TO_CODE,
   buildFilteredUrl_bg, buildFilteredUrl_popup,
   cleanTitle, fmtPrice,
 };

@@ -1381,7 +1381,101 @@ describe('regression tests', () => {
 
 
 // ═══════════════════════════════════════════════════════════════
-// 13. EDGE CASE STRESS TESTS
+// 13. NON-USD CURRENCY CONVERSION TESTS
+// ═══════════════════════════════════════════════════════════════
+
+describe('non-USD currency conversion', () => {
+  const rates = { EUR: 0.847, GBP: 0.739, JPY: 154.4, CAD: 1.368, AUD: 1.418 };
+
+  describe('convertToUSD', () => {
+    it('converts EUR to USD', () => {
+      const usd = h.convertToUSD(25.00, 'EUR', rates);
+      assert.equal(usd, Math.round((25.00 / 0.847) * 100) / 100);
+    });
+    it('converts GBP to USD', () => {
+      const usd = h.convertToUSD(7.00, 'GBP', rates);
+      assert.equal(usd, Math.round((7.00 / 0.739) * 100) / 100);
+    });
+    it('converts JPY to USD', () => {
+      const usd = h.convertToUSD(1500, 'JPY', rates);
+      assert.equal(usd, Math.round((1500 / 154.4) * 100) / 100);
+    });
+    it('returns amount unchanged for USD', () => {
+      assert.equal(h.convertToUSD(50.00, 'USD', rates), 50.00);
+    });
+    it('returns null for unknown currency', () => {
+      assert.equal(h.convertToUSD(10, 'XYZ', rates), null);
+    });
+  });
+
+  describe('parseFilteredPage with non-USD prices', () => {
+    it('extracts euro-only listing and converts to USD', () => {
+      const html = `1 - 25 of 5 Media Condition: Very Good Plus (VG+) Sleeve Condition: VG €25.00 about $28.12 Ships From: Germany`;
+      const pg = h.parseFilteredPage(html, false, false, rates);
+      assert.equal(pg.matched, 1);
+      assert.equal(pg.prices.length, 1);
+      assert.equal(pg.prices[0], Math.round((25.00 / 0.847) * 100) / 100);
+    });
+
+    it('extracts pound-only listing and converts to USD', () => {
+      const html = `1 - 25 of 3 Media Condition: Near Mint (NM or M-) Sleeve Condition: VG £7.00 about $9.46 Ships From: United Kingdom`;
+      const pg = h.parseFilteredPage(html, false, false, rates);
+      assert.equal(pg.prices.length, 1);
+      assert.equal(pg.prices[0], Math.round((7.00 / 0.739) * 100) / 100);
+    });
+
+    it('prefers direct $ over foreign currency in same block', () => {
+      const html = `1 - 25 of 10 Media Condition: Very Good Plus (VG+) Sleeve Condition: VG $50.00 +$6.00 Ships From: United States`;
+      const pg = h.parseFilteredPage(html, false, false, rates);
+      assert.equal(pg.prices[0], 50.00);
+    });
+
+    it('handles page where ALL listings are non-USD', () => {
+      const html = `
+        1 - 3 of 3
+        Media Condition: Very Good Plus (VG+) Sleeve Condition: VG €20.00 about $22.00 Ships From: France
+        Media Condition: Near Mint (NM or M-) Sleeve Condition: VG €35.00 about $38.50 Ships From: Germany
+        Media Condition: Very Good (VG) Sleeve Condition: G £12.00 about $16.20 Ships From: United Kingdom
+      `;
+      const pg = h.parseFilteredPage(html, false, false, rates);
+      assert.equal(pg.matched, 3);
+      assert.equal(pg.prices.length, 3);
+      // All should be converted from native currency, not "about" price
+      for (const p of pg.prices) {
+        assert.ok(p > 0, 'price should be positive');
+        assert.ok(p !== 22.00 && p !== 38.50 && p !== 16.20, 'should not use "about" price');
+      }
+    });
+
+    it('skips foreign shipping add-ons (+€5)', () => {
+      const html = `1 - 25 of 5 Media Condition: Very Good Plus (VG+) Sleeve Condition: VG €25.00 +€5.00 Ships From: Germany`;
+      const pg = h.parseFilteredPage(html, false, false, rates);
+      assert.equal(pg.prices.length, 1);
+      assert.equal(pg.prices[0], Math.round((25.00 / 0.847) * 100) / 100);
+    });
+
+    it('mixed USD and non-USD: lowest is correct', () => {
+      const html = `
+        1 - 25 of 10
+        Media Condition: Very Good Plus (VG+) Sleeve Condition: VG €80.00 about $94.12 Ships From: Germany
+        Media Condition: Very Good Plus (VG+) Sleeve Condition: VG $50.00 +$6.00 Ships From: United States
+      `;
+      const pg = h.parseFilteredPage(html, false, false, rates);
+      assert.equal(pg.prices.length, 2);
+      assert.equal(pg.lowest, 50.00);
+    });
+
+    it('handles CA$ currency', () => {
+      const html = `1 - 25 of 5 Media Condition: Very Good Plus (VG+) Sleeve Condition: VG CA$30.00 Ships From: Canada`;
+      const pg = h.parseFilteredPage(html, false, false, rates);
+      assert.equal(pg.prices.length, 1);
+      assert.equal(pg.prices[0], Math.round((30.00 / 1.368) * 100) / 100);
+    });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 14. EDGE CASE STRESS TESTS
 // ═══════════════════════════════════════════════════════════════
 
 describe('edge case stress tests', () => {
