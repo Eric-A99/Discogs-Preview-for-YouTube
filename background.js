@@ -538,7 +538,7 @@ async function buildResult(matches, query, usOnly) {
     matchCount: matches.length, numForSale: totalForSale,
     lowestPrice: globalLowest, lowestGrade: globalGrade,
     medianPrice: medianPrice, vgPlusPrice: bestVgPlus, nearMintPrice: bestNearMint,
-    sellUrl: primary.sellUrl, usOnly: usOnly,
+    sellUrl: primary.sellUrl || makeSellUrl(primary, query), usOnly: usOnly,
     matches: matchDetails
   };
 }
